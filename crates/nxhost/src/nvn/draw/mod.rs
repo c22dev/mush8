@@ -50,6 +50,8 @@ struct Engine {
     sampled: HashMap<textures::TexKey, Shared<gfx::Texture>>,
     touched: Vec<(textures::TexKey, Shared<gfx::Texture>)>,
     clears: Vec<PendingClear>,
+    // Each attachment has its own artwork sequence, including across pass breaks.
+    artwork: HashMap<(textures::TexKey, (u32, u32)), gfx::widescreen::ArtworkState>,
 }
 
 struct PendingClear {
@@ -73,6 +75,7 @@ impl Engine {
             let gone = |k: &textures::TexKey| dead.iter().any(|&(lo, hi)| k.addr >= lo && k.addr < hi);
             self.textures.evict(&gone);
             self.target_first_frame.retain(|k, _| !gone(k));
+            self.artwork.retain(|(k, _), _| !gone(k));
         }
     }
 }
@@ -141,6 +144,7 @@ impl Replay<'_> {
                     }
                     let c = rgba.map(|x| x as f64);
                     let sub = super::objects::view_subresource(&b);
+                    self.e.artwork.remove(&(key, sub));
                     self.defer_clear(PendingClear { key, sub, tex: t, load: Load::ClearColor(c), stencil: false });
                 }
                 Cmd::ClearDepthStencil { depth: z, stencil } => {
@@ -227,14 +231,26 @@ impl Replay<'_> {
                     self.end_pass();
                     self.flush_clears();
                     self.copy_buffer_to_texture(*src, dst, *region);
+                    if let Some(key) = textures::TexKey::of(dst) {
+                        self.e.textures.set_rendered_screen(key, false);
+                        self.e.artwork.remove(&(key, super::objects::view_subresource(dst)));
+                    }
                 }
                 Cmd::CopyTextureToTexture { src, src_region, dst, dst_region, flags } => {
                     self.end_pass();
                     self.flush_clears();
                     let r = match (self.e.textures.get(src, false), self.e.textures.get(dst, true)) {
-                        (Some((_, s)), Some((_, d))) => {
+                        (Some((sk, s)), Some((dk, d))) => {
                             let (ss, ds) = (super::objects::view_subresource(src), super::objects::view_subresource(dst));
-                            self.e.copier.copy(&self.cb, &s, ss, *src_region, &d, ds, *dst_region, *flags)
+                            let result = self.e.copier.copy(&self.cb, &s, ss, *src_region, &d, ds, *dst_region, *flags);
+                            if result.is_ok() {
+                                let full = ss == (0, 0) && ds == (0, 0) && *src_region == sk.full_region()
+                                    && *dst_region == dk.full_region();
+                                let screen = full && self.e.textures.is_rendered_screen(sk);
+                                self.e.textures.set_rendered_screen(dk, screen);
+                                self.e.artwork.remove(&(dk, ds));
+                            }
+                            result
                         }
                         _ => Err("copy of an unavailable texture"),
                     };
@@ -257,7 +273,14 @@ impl Replay<'_> {
                     self.end_pass();
                     self.flush_clears();
                     let r = match self.e.textures.get(dst, true) {
-                        Some((_, d)) => self.e.copier.clear(&self.cb, &d, super::objects::view_subresource(dst), *region, *color, *mask),
+                        Some((key, d)) => {
+                            let sub = super::objects::view_subresource(dst);
+                            let result = self.e.copier.clear(&self.cb, &d, sub, *region, *color, *mask);
+                            if result.is_ok() && *region == key.full_region() && *mask == 0xf {
+                                self.e.artwork.remove(&(key, sub));
+                            }
+                            result
+                        }
                         None => Err("clear of an unavailable texture"),
                     };
                     let _ = r;
@@ -403,6 +426,9 @@ impl Replay<'_> {
                 });
                 fmts.push(t.as_ref().map(|(_, t)| t.0.pixelFormat()));
                 colors.push(t.map(|(k, t)| {
+                    if gfx::widescreen::scale() > 1.0 {
+                        self.e.textures.set_rendered_screen(k, true);
+                    }
                     if !self.e.touched.iter().any(|(tk, _)| *tk == k) {
                         self.e.touched.push((k, t.clone()));
                     }
@@ -632,6 +658,7 @@ pub fn present(texture: u64) {
         let t = {
             let mut e = ENGINE.lock().unwrap();
             e.forget_dead();
+            e.artwork.clear();
             e.textures.get(&b, true)
         };
         if let Some((_, t)) = t {
@@ -652,6 +679,8 @@ pub fn write_texels(mut b: TexBuilder, view: u64, region: [i32; 6], data: *const
         if w == 0 || h == 0 || data.is_null() {
             return;
         }
+        e.textures.set_rendered_screen(key, false);
+        e.artwork.remove(&(key, super::objects::view_subresource(&b)));
         let row = w.div_ceil(bw as usize) * bpb as usize;
         let image = row * h.div_ceil(bh as usize);
         let (row, image) = strides.filter(|s| s.0 >= row).unwrap_or((row, image));

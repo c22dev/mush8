@@ -55,6 +55,11 @@ Or make an `.ipa` to install with AltStore / SideStore (no signing needed on the
 ```
 it ends up in `build/Mush8.ipa`
 
+## iOS ultrawide display
+Enable **Ultrawide** in the iOS launcher before pressing **Play** to use a wider
+racing view in Mario Kart 8 Deluxe 4.0.1. Turn it off to use the original aspect
+ratio. To change modes after starting a game, fully close and reopen the app.
+
 ## Multiplayer
 Pick a mode in the launcher, under Multiplayer :
 - LAN : players on the same network, a Switch can join too

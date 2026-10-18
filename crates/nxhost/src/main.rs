@@ -197,6 +197,11 @@ fn apply_launcher_settings() {
     if field("motion_controls").as_deref() == Some("true") {
         unsafe { std::env::set_var("NX_MOTION", "1") };
     }
+    match field("ultrawide").as_deref() {
+        Some("true") => unsafe { std::env::set_var("NX_ULTRAWIDE", "1") },
+        Some("false") => unsafe { std::env::set_var("NX_ULTRAWIDE", "0") },
+        _ => {}
+    }
     if field("handheld").as_deref() != Some("false") {
         unsafe { std::env::set_var("NX_HANDHELD", "1") };
     }

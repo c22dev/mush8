@@ -6,6 +6,7 @@ pub mod keypage {
     pub const SVC_GATE: u32 = 0x08;
     pub const CNT_MUL: u32 = 0x10;
     pub const NET: u32 = 0x18;
+    pub const ASPECT_SCALE: u32 = 0x20;
 }
 
 pub mod ctx {

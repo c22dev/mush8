@@ -192,6 +192,7 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
             *((kp + keypage::SVC_GATE as u64) as *mut u64) = crate::guest::nx_svc_gate as *const () as usize as u64;
             *((kp + keypage::CNT_MUL as u64) as *mut u64) = cnt_mul as u64;
             *((kp + keypage::NET as u64) as *mut u8) = net_mode();
+            *((kp + keypage::ASPECT_SCALE as u64) as *mut f32) = crate::gfx::widescreen::scale();
         }
         let text_end = align_up(m.text, PAGE);
         let data_start = align_down(m.data.0, PAGE);

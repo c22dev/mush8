@@ -30,6 +30,10 @@ pub struct TexKey {
 }
 
 impl TexKey {
+    pub fn full_region(self) -> super::copy::Region {
+        [0, 0, 0, self.width as i32, self.height as i32, 1]
+    }
+
     pub fn of(b: &TexBuilder) -> Option<TexKey> {
         Self::of_in(b, &STATE.lock().unwrap())
     }
@@ -67,6 +71,7 @@ pub struct Textures {
     default_sampler: Option<Shared<Sampler>>,
     misses: u64,
     uploaded: FastMap<TexKey, ([u64; WINDOWS], u64, u64)>,
+    rendered_screens: std::collections::HashSet<TexKey>,
     pub frame: u64,
 }
 
@@ -78,6 +83,20 @@ impl Textures {
         self.storage.retain(|k, _| !gone(k));
         self.views.retain(|(k, _, _), _| !gone(k));
         self.uploaded.retain(|k, _| !gone(k));
+        self.rendered_screens.retain(|k| !gone(k));
+    }
+
+    pub fn is_rendered_screen(&self, key: TexKey) -> bool {
+        self.rendered_screens.contains(&TexKey { format: 0, ..key })
+    }
+
+    pub fn set_rendered_screen(&mut self, key: TexKey, rendered: bool) {
+        let key = TexKey { format: 0, ..key };
+        if rendered && gfx::widescreen::is_screen_size(key.width, key.height) {
+            self.rendered_screens.insert(key);
+        } else {
+            self.rendered_screens.remove(&key);
+        }
     }
 
     pub fn cached(&self, key: &TexKey) -> Option<(TexKey, Shared<Texture>)> {
@@ -108,6 +127,7 @@ impl Textures {
                         if changed {
                             let levels = t.0.mipmapLevelCount() as u32;
                             upload(b, &key, &t.0, levels);
+                            self.set_rendered_screen(key, false);
                             hashes = memory_hashes(key.addr, len);
                         }
                         self.uploaded.insert(key, (hashes, frame, len));
@@ -692,4 +712,39 @@ pub fn copy_blocks(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, only: 
         }
     }
     enc.endEncoding();
+}
+
+#[cfg(test)]
+mod widescreen_tests {
+    use super::*;
+
+    fn screen(format: u32) -> TexKey {
+        TexKey { addr: 0x1000, format, target: 1, width: 1280, height: 720, depth: 1, levels: 1 }
+    }
+
+    #[test]
+    fn screen_provenance_survives_format_views_and_is_invalidated_by_uploads() {
+        let mut textures = Textures::default();
+        assert!(!textures.is_rendered_screen(screen(1)));
+        textures.set_rendered_screen(screen(1), true);
+        assert!(textures.is_rendered_screen(screen(2)));
+        textures.set_rendered_screen(screen(2), false);
+        assert!(!textures.is_rendered_screen(screen(1)));
+    }
+
+    #[test]
+    fn freed_screen_storage_cannot_classify_reused_memory() {
+        let mut textures = Textures::default();
+        textures.set_rendered_screen(screen(1), true);
+        textures.evict(&|key| key.addr == 0x1000);
+        assert!(!textures.is_rendered_screen(screen(1)));
+    }
+
+    #[test]
+    fn small_preview_targets_do_not_become_screen_sources() {
+        let mut textures = Textures::default();
+        let preview = TexKey { width: 170, height: 105, ..screen(1) };
+        textures.set_rendered_screen(preview, true);
+        assert!(!textures.is_rendered_screen(preview));
+    }
 }

@@ -4,6 +4,7 @@
 mod ios;
 pub mod bc;
 pub mod overlay;
+pub mod widescreen;
 #[cfg(target_os = "ios")]
 mod touch;
 
@@ -444,7 +445,8 @@ pub fn present(tex: &Texture, flip: bool) {
     if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&desc) {
         let (params, aspect) = present_params(tex, flip);
         ASPECT.store(aspect.to_bits(), std::sync::atomic::Ordering::Relaxed);
-        enc.setViewport(letterbox(aspect, size.width, size.height));
+        let display_aspect = if widescreen::scale() > 1.0 { size.width / size.height } else { aspect };
+        enc.setViewport(letterbox(display_aspect, size.width, size.height));
         enc.setRenderPipelineState(&g.present.0);
         unsafe {
             let p = std::ptr::NonNull::from(&params).cast();

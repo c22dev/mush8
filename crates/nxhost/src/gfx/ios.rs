@@ -145,6 +145,7 @@ define_class!(
 
 fn metal_view(scene: &UIWindowScene, window: &UIWindow, mtm: MainThreadMarker) -> (Retained<MetalView>, Retained<CAMetalLayer>) {
     let frame = UICoordinateSpace::bounds(window);
+    super::widescreen::set_display(frame.size.width, frame.size.height);
     let view: Retained<MetalView> = unsafe { msg_send![MetalView::alloc(mtm), initWithFrame: frame] };
     view.setBackgroundColor(Some(&UIColor::blackColor()));
     view.setContentScaleFactor(scene.screen().nativeScale());

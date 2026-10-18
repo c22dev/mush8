@@ -35,6 +35,7 @@ final class Settings: ObservableObject {
     @Published var backgroundCompile = true
     @Published var motion = false
     @Published var handheld = true
+    @Published var ultrawide = ProcessInfo.processInfo.environment["NX_ULTRAWIDE"] == "1"
     @Published var phonePads = false
     var extra: [String: Any] = [:]
     private var autosave: AnyCancellable?
@@ -53,6 +54,7 @@ final class Settings: ObservableObject {
         backgroundCompile = json["background_compile"] as? Bool ?? true
         motion = json["motion_controls"] as? Bool ?? false
         handheld = json["handheld"] as? Bool ?? true
+        ultrawide = json["ultrawide"] as? Bool ?? ultrawide
         phonePads = json["phone_pads"] as? Bool ?? false
     }
 
@@ -68,6 +70,7 @@ final class Settings: ObservableObject {
         json["motion"] = nil
         json["motion_controls"] = motion
         json["handheld"] = handheld
+        json["ultrawide"] = ultrawide
         json["phone_pads"] = phonePads
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
@@ -278,6 +281,11 @@ struct LauncherView: View {
                     }
                 } footer: {
                     Text("Handheld renders at 720p: lighter on the GPU and battery")
+                }
+                Section {
+                    Toggle("Ultrawide", isOn: $s.ultrawide)
+                } footer: {
+                    Text("Expands the racing view to fill your screen. Applies when you start the game.")
                 }
                 Section {
                     Toggle("Prewarm pipelines", isOn: $s.prewarm)

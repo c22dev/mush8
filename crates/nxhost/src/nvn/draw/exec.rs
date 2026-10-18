@@ -31,6 +31,23 @@ impl Replay<'_> {
         let (Some(vs), Some(fs)) = (vs, fs) else { return Err("program without vertex+fragment stages") };
         self.ensure_pass()?;
         let targets = self.pass.as_ref().unwrap().targets.clone();
+        let (w, h) = self.pass.as_ref().unwrap().size;
+        let scale = gfx::widescreen::scale();
+        let ui = scale > 1.0 && gfx::widescreen::is_ui(vs.hash, w, h);
+        // Classify from guest descriptors before any asynchronous shader lookup
+        // can skip the draw that establishes the artwork pass.
+        let texture0 = if ui {
+            let state = super::STATE.lock().unwrap();
+            let tid = (st.textures[1][0] & 0xF_FFFF) as u32;
+            state.registered_textures.get(&(st.texture_pool, tid))
+                .and_then(|tb| super::textures::TexKey::of_in(tb, &state))
+                .map(|k| (k.width, k.height, super::textures::is_compressed(k.format)))
+        } else { None };
+        let artwork = if scale > 1.0 {
+            self.update_artwork(ui, (vs.hash, fs.hash), texture0)
+        } else {
+            gfx::widescreen::ArtworkState::default()
+        };
         let (mut uints, mut sints) = (0, 0);
         for (i, f) in targets.colors.iter().enumerate() {
             match f.map_or(0, super::shaders::integer_kind) {
@@ -40,7 +57,8 @@ impl Replay<'_> {
             }
         }
         use super::shaders::Lookup;
-        let wait = self.pass.as_ref().unwrap().fresh;
+        // Skipping any UI layer can expose a previous frame only at the edges.
+        let wait = self.pass.as_ref().unwrap().fresh || ui;
         let fsc = match self.e.shaders.function(&fs, 0, uints, sints, wait) {
             Lookup::Ready(f) => f,
             Lookup::Pending => return Err("shader compiling"),
@@ -52,7 +70,6 @@ impl Replay<'_> {
             Lookup::Pending => return Err("shader compiling"),
             Lookup::Failed => return Err("vertex shader failed"),
         };
-        let (w, h) = self.pass.as_ref().unwrap().size;
         let pipeline = self.e.states.pipeline(&vsc, (vs.hash, extra), &fsc, fs.hash ^ (uints as u64) << 48 ^ (sints as u64) << 56, &targets, &st, wait)?;
         let ds = self.e.states.depth_stencil(&st, targets.depth.is_some(), targets.stencil);
 
@@ -127,10 +144,38 @@ impl Replay<'_> {
         if st.polygon & 3 == 3 {
             return Ok(());
         }
+        let mut display_st = st;
+        let layout = if ui {
+            // Preserve the known main-menu path, and recognize shared backdrop
+            // masks by their sampled screen texture on other menu pages as well.
+            // Depth state alone also matches ordinary mode-selection controls.
+            let menu_backdrop = texture0.is_some_and(|(mw, mh, _)|
+                bound.iter().any(|(fragment, binding, tex, _, _)| *fragment && *binding == 1 &&
+                    gfx::widescreen::is_menu_backdrop(st.depth_stencil as u32, (mw, mh),
+                        (tex.0.width() as u32, tex.0.height() as u32, tex.0.pixelFormat().0 as u64))));
+            let menu_fade = !artwork.covering && gfx::widescreen::is_menu_fade(vs.hash, st.depth_stencil as u32, texture0);
+            let intro_composite = gfx::widescreen::is_intro_composite(vs.hash, fs.hash);
+            let frame_copy = d.count == 6 && d.instances == 1 &&
+                st.viewport.is_none_or(|v| v == [0.0, 0.0, w as f32, h as f32]) &&
+                [sx, sy, sw, sh] == [0, 0, w, h] &&
+                bound.iter().any(|(fragment, binding, tex, _, _)| *fragment && *binding == 0 &&
+                    gfx::widescreen::is_frame_copy(vs.hash, fs.hash, st.depth_stencil as u32, st.color_state,
+                        (tex.0.width() as u32, tex.0.height() as u32, tex.0.pixelFormat().0 as u64)));
+            let screen_composite = gfx::widescreen::is_screen_composite(
+                (w, h), st.viewport, st.depth_stencil as u32, d.count, d.instances,
+                || self.samples_rendered_screen(&st, &fsc),
+            );
+            artwork.layout(menu_backdrop || intro_composite || frame_copy || screen_composite, menu_fade, st.depth_stencil as u32)
+        } else {
+            gfx::widescreen::Layout::Original
+        };
+        let transform = gfx::widescreen::DisplayTransform { size: (w, h), scale };
+        let (viewport, display_scissor) = transform.apply(layout, st.viewport, [sx, sy, sw, sh]);
+        display_st.viewport = viewport;
         let prev = self.pass.as_ref().unwrap().fixed;
         let next = {
             let enc = &self.pass.as_ref().unwrap().enc;
-            bind_fixed(enc, prev, &pipeline, &ds, &st, upper_left, (w, h), [sx, sy, sw, sh])
+            bind_fixed(enc, prev, &pipeline, &ds, &display_st, upper_left, (w, h), display_scissor)
         };
         self.pass.as_mut().unwrap().fixed = Some(next);
         let enc = &self.pass.as_ref().unwrap().enc;
@@ -162,6 +207,35 @@ impl Replay<'_> {
             }
         }
         Ok(())
+    }
+
+    fn update_artwork(&mut self, ui: bool, shaders: (u64, u64), texture: Option<(u32, u32, bool)>) -> gfx::widescreen::ArtworkState {
+        let mut artwork = gfx::widescreen::ArtworkState::default();
+        if !ui && self.e.artwork.is_empty() {
+            return artwork;
+        }
+        for key in &self.pass.as_ref().unwrap().keys {
+            if !ui {
+                self.e.artwork.remove(key);
+                continue;
+            }
+            let state = self.e.artwork.entry(*key).or_default();
+            state.observe(ui, shaders.0, shaders.1, self.e.st.depth_stencil as u32, texture);
+            artwork.covering |= state.covering;
+            artwork.main_menu |= state.main_menu;
+        }
+        artwork
+    }
+
+    fn samples_rendered_screen(&self, st: &super::GState, shader: &super::shaders::Compiled) -> bool {
+        let state = super::STATE.lock().unwrap();
+        shader.iface.textures.keys().any(|&binding| {
+            let Some(&handle) = st.textures[1].get(binding as usize) else { return false };
+            let Some(builder) = state.registered_textures.get(&(st.texture_pool, (handle & 0xF_FFFF) as u32)) else { return false };
+            let Some(key) = super::textures::TexKey::of_in(builder, &state) else { return false };
+            self.e.textures.is_rendered_screen(key)
+                && !self.pass.as_ref().unwrap().keys.iter().any(|(target, _)| target.addr == key.addr)
+        })
     }
 
     fn stage_textures(&mut self, st: &super::GState, stage: usize, c: &super::shaders::Compiled) -> Vec<(u32, gfx::Shared<gfx::Texture>, u32, gfx::Shared<super::textures::Sampler>)> {
