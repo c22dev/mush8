@@ -1035,7 +1035,7 @@ impl<'a> Gen<'a> {
 
                         self.line(format!("uint gv[{words}];"));
                         for k in 0..words {
-                            self.line(format!("gv[{k}] = gp[{k}];"));
+                            self.line(format!("gv[{k}] = gmem(res, (ga & ~3ul) + {k}ul * 4ul)[0];"));
                         }
                         for k in 0..words {
                             if d != RZ_ {
@@ -1046,7 +1046,7 @@ impl<'a> Gen<'a> {
                 } else if size >= 4 {
                     for k in 0..words {
                         let v = self.r(if d == RZ_ { RZ_ } else { d + k });
-                        self.line(format!("if (ga - res.heap_base < res.heap_size) gp[{k}] = {v};"));
+                        self.line(format!("if (ga + {k}ul * 4ul - res.heap_base < res.heap_size) gmem(res, (ga & ~3ul) + {k}ul * 4ul)[0] = {v};"));
                     }
                 } else {
                     self.warnings.push("sub-word global stores ignored".into());
@@ -1569,14 +1569,22 @@ struct Res {
     float alpha_ref;
     uint alpha_func;
     ulong heap_base;
-    ulong heap_gpu;
+    ulong heap_gpu[16];
     ulong heap_size;
+    ulong heap_chunk_size;
     ulong zero_gpu;
 };
 
 static inline device uint* gmem(constant Res& res, ulong ga) {
     ulong off = ga - res.heap_base;
-    return reinterpret_cast<device uint*>(off < res.heap_size ? res.heap_gpu + off : res.zero_gpu);
+    if (off >= res.heap_size || res.heap_chunk_size == 0ul) return reinterpret_cast<device uint*>(res.zero_gpu);
+    // Most devices fit the entire heap in one buffer; A15 needs only two.
+    // Keep both paths free of the expensive runtime 64-bit divide/remainder.
+    if (off < res.heap_chunk_size) return reinterpret_cast<device uint*>(res.heap_gpu[0] + off);
+    ulong second = off - res.heap_chunk_size;
+    if (second < res.heap_chunk_size) return reinterpret_cast<device uint*>(res.heap_gpu[1] + second);
+    ulong chunk = off / res.heap_chunk_size;
+    return reinterpret_cast<device uint*>(res.heap_gpu[chunk] + off % res.heap_chunk_size);
 }
 
 static inline bool bop(uint op, bool a, bool b) {

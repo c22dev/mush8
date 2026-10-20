@@ -106,9 +106,49 @@ pub struct Res {
     pub alpha_ref: f32,
     pub alpha_func: u32,
     pub heap_base: u64,
-    pub heap_gpu: u64,
+    pub heap_gpu: [u64; gfx::MAX_HEAP_CHUNKS],
     pub heap_size: u64,
+    pub heap_chunk_size: u64,
     pub zero_gpu: u64,
+}
+
+#[cfg(all(test,target_os="macos"))]
+mod segmented_heap_tests {
+    use super::*;
+    use objc2::runtime::ProtocolObject;
+    #[test]
+    #[ignore = "requires a real Metal GPU"]
+    fn gpu_reads_and_writes_across_heap_chunks() {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let page=crate::mem::PAGE as usize;
+            let mem=libc::mmap(std::ptr::null_mut(),page*4,libc::PROT_READ|libc::PROT_WRITE,libc::MAP_PRIVATE|libc::MAP_ANON,-1,0);
+            assert_ne!(mem,libc::MAP_FAILED);
+            // The global heap retains these no-copy buffers until process exit.
+            std::env::set_var("NX_GPU_HEAP_CHUNK_BYTES",page.to_string());
+            assert!(gfx::wrap_heap(mem as u64,(page*4) as u64));
+            std::env::remove_var("NX_GPU_HEAP_CHUNK_BYTES");
+            let h=gfx::heap().unwrap();assert_eq!(h.chunks.len(),4);
+            let words=std::slice::from_raw_parts_mut(mem as *mut u32,page);
+            words[page/4-1]=41;words[page/4]=82;words[page/2]=123;
+            let dev=&gfx::gpu().device.0;
+            let source=format!("{}\nkernel void heap_probe(constant Res& r [[buffer(0)]], device uint* out [[buffer(1)]]) {{ ulong p=r.heap_base; out[0]=*gmem(r,p+{}ul); out[1]=*gmem(r,p+{}ul); out[2]=*gmem(r,p+{}ul); out[3]=*gmem(r,p+r.heap_size); *gmem(r,p+{}ul)=456u; *gmem(r,p+{}ul)=789u; }}",nxshader::prelude(),page-4,page,page*2,page-4,page);
+            let lib=dev.newLibraryWithSource_options_error(&NSString::from_str(&source),None).unwrap();
+            let func=lib.newFunctionWithName(&NSString::from_str("heap_probe")).unwrap();
+            let pipeline=dev.newComputePipelineStateWithFunction_error(&func).unwrap();
+            let out=dev.newBufferWithLength_options(16,MTLResourceOptions::StorageModeShared).unwrap();
+            let mut res:Res=std::mem::zeroed();
+            res.heap_base=h.base;res.heap_size=h.size;res.heap_chunk_size=h.chunk_size;res.heap_gpu=h.gpu_addresses();res.zero_gpu=gfx::gpu().zeros.0.gpuAddress();
+            let cb=gfx::gpu().queue.0.commandBuffer().unwrap();let enc=cb.computeCommandEncoder().unwrap();
+            enc.setComputePipelineState(&pipeline);
+            for chunk in &h.chunks {enc.useResource_usage(ProtocolObject::from_ref(&*chunk.buffer.0),MTLResourceUsage::Read|MTLResourceUsage::Write);}
+            enc.setBytes_length_atIndex(std::ptr::NonNull::from(&res).cast(),size_of::<Res>(),0);
+            enc.setBuffer_offset_atIndex(Some(&out),0,1);
+            enc.dispatchThreadgroups_threadsPerThreadgroup(MTLSize{width:1,height:1,depth:1},MTLSize{width:1,height:1,depth:1});
+            enc.endEncoding();cb.commit();cb.waitUntilCompleted();
+            assert_eq!(std::slice::from_raw_parts(out.contents().as_ptr() as *const u32,4),&[41,82,123,0]);
+            assert_eq!(words[page/4-1],456);assert_eq!(words[page/4],789);
+        });
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]

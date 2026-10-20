@@ -1,4 +1,9 @@
 # Mush8
+
+This feature branch adds optional firmware-free MK8 Deluxe 4.0.1 compatibility,
+native aspect adaptation and Apple-device fixes. See [ADAPTATIONS.md](ADAPTATIONS.md)
+for setup, limitations and validation. The upstream instructions below describe
+the default firmware-backed setup.
 A native Mach-O iOS/macOS port of Mario Kart 8 Deluxe, with LAN, online and wireless multiplayer
 
 ## How does this work ?

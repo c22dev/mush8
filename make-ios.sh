@@ -33,6 +33,12 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 PATCHED="$PWD/work/v-upd/patched"
 CACHE=work/shader_cache_ios.noindex
 RES=target/ios-res
+# Opt-in profile: keep all executable adaptations baked before signing.
+if [ "${FIRMWARE_FREE:-0}" = 1 ]; then
+  export NX_MISSING_MII=1
+  export NX_FALLBACK_FONT="${NX_FALLBACK_FONT:-$PWD/work/host-font.ttf}"
+  [ -f "$NX_FALLBACK_FONT" ] || { echo "prepare a local font first: see ADAPTATIONS.md"; exit 1; }
+fi
 
 cargo build --release
 [ -f work/v-upd/exefs/main ] || ./target/release/nxfs extract --base base.nsp --update upd4-0-1.nsp --out work/v-upd
@@ -57,7 +63,10 @@ NX_MODULES_DIR="$PATCHED" IPHONEOS_DEPLOYMENT_TARGET=26.0 \
   cargo "+$TOOLCHAIN" build --release -p nxhost --target aarch64-apple-ios --target-dir target/ios
 
 rm -rf "$RES"
-mkdir -p "$RES/modules" "$RES/shaders"
+mkdir -p "$RES/modules" "$RES/shaders" "$RES/fallback"
+if [ -f "${NX_FALLBACK_FONT:-work/host-font.ttf}" ]; then
+  cp "${NX_FALLBACK_FONT:-work/host-font.ttf}" "$RES/fallback/host-font.ttf"
+fi
 cp "$PATCHED"/*.layout work/v-upd/exefs/main.npdm "$RES/modules/"
 cp -c "$CACHE"/*.metallib "$CACHE"/index.tsv "$CACHE"/guest.tsv "$RES/shaders/"
 cp "$LIST" "$RES/shaders/pipelines.tsv"

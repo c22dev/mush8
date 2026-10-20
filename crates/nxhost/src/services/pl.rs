@@ -28,6 +28,9 @@ fn fonts() -> &'static Fonts {
         let cfg = super::fs::CONFIG.get().expect("fs not configured");
         let mut entries = Vec::new();
         let mut pos = 0u64;
+        // Explicit local SFNT fallback; never download or synthesize firmware fonts.
+        let fallback = std::env::var_os("NX_FALLBACK_FONT").and_then(|p| std::fs::read(p).ok());
+        let mut fallback_entry = None;
         for (id, file) in FONTS {
             let data = super::fs::system_data(cfg, id).and_then(|s| {
                 let fs = nxfs::romfs::RomFs::open(s).ok()?;
@@ -35,6 +38,18 @@ fn fonts() -> &'static Fonts {
                 fs.storage().read_vec(f.offset, f.size as usize).ok()
             });
             let Some(data) = data.filter(|d| d.len() > 8 && pos + d.len() as u64 <= SHARED_MEMORY_SIZE) else {
+                if let Some(data) = fallback.as_ref().filter(|d| d.starts_with(&[0,1,0,0]) || d.starts_with(b"OTTO")) {
+                    let entry = *fallback_entry.get_or_insert_with(|| {
+                        assert!(pos + data.len() as u64 <= SHARED_MEMORY_SIZE, "local font exceeds shared memory");
+                        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), (shm.host + pos) as *mut u8, data.len()) };
+                        let entry = (pos as u32, data.len() as u32);
+                        pos += data.len() as u64;
+                        entry
+                    });
+                    eprintln!("[pl] {file}: local host font fallback ({} bytes)", entry.1);
+                    entries.push(entry);
+                    continue;
+                }
                 eprintln!("[pl] font {file} unavailable");
                 entries.push((0, 0));
                 continue;

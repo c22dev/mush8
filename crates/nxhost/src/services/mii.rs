@@ -94,8 +94,14 @@ struct Database;
 
 impl Database {
     fn listed(flag: u32) -> Vec<[u8; CHAR_INFO_SIZE]> {
-        let _ = SOURCE_DATABASE;
-        if flag & SOURCE_DEFAULT != 0 { defaults().clone() } else { Vec::new() }
+        // A fresh local account needs one selectable Mii without launching the
+        // firmware Mii editor applet. Use the SDK-validated host default record.
+        if flag & SOURCE_DATABASE != 0 {
+            let mut c=defaults()[0];
+            c[f::NAME..f::NAME+22].fill(0);
+            for (i,ch) in "Player".encode_utf16().enumerate(){c[f::NAME+2*i..f::NAME+2*i+2].copy_from_slice(&ch.to_le_bytes());}
+            vec![c]
+        } else if flag & SOURCE_DEFAULT != 0 { defaults().clone() } else { Vec::new() }
     }
 }
 

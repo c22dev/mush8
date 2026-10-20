@@ -271,7 +271,9 @@ fn compile_inner(blob: &[u8], compute: bool, extra_outputs: u32, uint_targets: u
 }
 
 pub(super) fn aot_dir() -> &'static str {
-    static DIR: LazyLock<String> = LazyLock::new(|| std::env::var("NX_SHADER_CACHE").unwrap_or_else(|_| "work/shader_cache.noindex".into()));
+    // The key excludes the shared prelude. Invalidate AOT libraries when its
+    // heap mapping ABI or implementation changes (v2 adds division-free paths).
+    static DIR: LazyLock<String> = LazyLock::new(|| format!("{}/heap-segments-v2",std::env::var("NX_SHADER_CACHE").unwrap_or_else(|_| "work/shader_cache.noindex".into())));
     &DIR
 }
 

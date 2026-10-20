@@ -18,6 +18,9 @@ targets:
       - path: ../target/ios-res/shaders
         type: folder
         buildPhase: resources
+      - path: ../target/ios-res/fallback
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: ch.cclerc.mush8

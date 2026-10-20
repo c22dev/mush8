@@ -288,8 +288,8 @@ impl Replay<'_> {
         let image = row * h.div_ceil(bh as usize);
         let layered = matches!(tex.0.textureType(), MTLTextureType::Type2DArray | MTLTextureType::TypeCube | MTLTextureType::TypeCubeArray);
         let len = image * d.max(1);
-        let (buf, off) = match gfx::heap().filter(|h| h.gpu_addr(src).is_some() && h.gpu_addr(src + len as u64 - 1).is_some()) {
-            Some(h) => (h.buffer.clone(), (src - h.base) as usize),
+        let (buf, off) = match gfx::heap().and_then(|h| h.buffer_range(src,len as u64)) {
+            Some((chunk,off)) => (chunk.buffer.clone(), off),
             None => {
                 let data = unsafe { std::slice::from_raw_parts(src as *const u8, len) };
                 let a = self.e.arena.alloc_bytes(data);
@@ -353,7 +353,7 @@ impl Replay<'_> {
         }
     }
 
-    fn gpu(&self, addr: u64, overlay: bool) -> u64 {
+    fn gpu_range(&mut self, addr: u64, size: u64, overlay: bool) -> u64 {
         if overlay {
             if let Some((&base, &(size, gpu, _))) = self.e.overlays.range(..=addr).next_back() {
                 if addr < base + size {
@@ -361,7 +361,19 @@ impl Replay<'_> {
                 }
             }
         }
-        self.heap.and_then(|h| h.gpu_addr(addr)).unwrap_or_else(|| gfx::gpu().zeros.0.gpuAddress())
+        if let Some(h) = self.heap {
+            let size = size.max(1);
+            if let Some((chunk,off)) = h.buffer_range(addr,size) { return chunk.gpu+off as u64; }
+            if h.gpu_addr(addr).is_some() && addr.checked_add(size-1).and_then(|last|h.gpu_addr(last)).is_some() {
+                // Vertex/uniform pointers are contiguous in Metal. Stage the
+                // uncommon binding that crosses two noncontiguous GPU chunks.
+                let data = unsafe { std::slice::from_raw_parts(addr as *const u8,size as usize) };
+                let a = self.e.arena.alloc_bytes(data);
+                if a.new_chunk { self.use_chunk(&a.buffer); }
+                return a.gpu;
+            }
+        }
+        gfx::gpu().zeros.0.gpuAddress()
     }
 
     fn defer_clear(&mut self, c: PendingClear) {

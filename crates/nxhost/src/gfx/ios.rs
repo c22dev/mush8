@@ -77,6 +77,8 @@ define_class!(
             let _: () = unsafe { msg_send![super(self), layoutSubviews] };
             let layer: Retained<CALayer> = self.layer();
             layer.setContentsScale(self.contentScaleFactor());
+            let b=self.bounds().size;
+            if b.width>=b.height { crate::display::update_size(b.width,b.height); }
         }
     }
 );
@@ -151,6 +153,8 @@ fn metal_view(scene: &UIWindowScene, window: &UIWindow, mtm: MainThreadMarker) -
     let layer: Retained<CAMetalLayer> = unsafe { Retained::cast_unchecked(view.layer()) };
     layer.setDevice(Some(&gpu().device.0));
     layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+    let b=scene.screen().nativeBounds().size;
+    super::super::display::update_size(b.width.max(b.height),b.width.min(b.height));
     (view, layer)
 }
 

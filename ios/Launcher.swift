@@ -29,6 +29,7 @@ let configURL = docsURL.appendingPathComponent("config.json")
 
 final class Settings: ObservableObject {
     @Published var network = "off"
+    @Published var language = "system"
     @Published var lanPlayServer = ""
     @Published var prewarm = true
     @Published var rumble = true
@@ -46,6 +47,7 @@ final class Settings: ObservableObject {
         guard let data = try? Data(contentsOf: configURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         extra = json
+        language = json["language"] as? String ?? "system"
         network = json["network"] as? String ?? ((json["lan"] as? Bool ?? false) ? "lan" : "off")
         lanPlayServer = json["lanplay_server"] as? String ?? ""
         prewarm = json["prewarm_pipelines"] as? Bool ?? true
@@ -59,6 +61,7 @@ final class Settings: ObservableObject {
     func save() throws {
         var json = extra
         json["network"] = network
+        json["language"] = language
         json["lanplay_server"] = lanPlayServer
         json["lan"] = nil
         json["extra_pads"] = nil
@@ -102,10 +105,12 @@ struct GameFile: Identifiable {
     let name: String
     var optional = false
     var present: Bool {
-        let path = docsURL.appendingPathComponent(name).path
-        var dir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: path, isDirectory: &dir) else { return false }
-        return !dir.boolValue || !((try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []).isEmpty
+        let url = docsURL.appendingPathComponent(name)
+        var directory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory) {
+            return !directory.boolValue || !((try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []).isEmpty
+        }
+        return name == "base.nsp" && FileManager.default.fileExists(atPath: docsURL.appendingPathComponent("base.nca").path)
     }
 
     func status(_ found: Bool) -> String {
@@ -139,7 +144,7 @@ let gameFiles = [
     GameFile(id: "Update", name: "upd4-0-1.nsp"),
     GameFile(id: "Booster Course Pass", name: "dlc.nsp", optional: true),
     GameFile(id: "Console Keys", name: "prod.keys"),
-    GameFile(id: "Firmware", name: "Firmware"),
+    GameFile(id: "Firmware", name: "Firmware", optional: true),
 ]
 
 final class Files: ObservableObject {
@@ -225,6 +230,7 @@ struct LauncherView: View {
                     importView
                 }
                 Button("Use as a controller for a Mac") {
+                    try? s.save()
                     network.stop()
                     controller()
                 }
@@ -235,6 +241,27 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
             Form {
                 if !files.ready { gameFilesSection }
+                Section("游戏语言 / Game language") {
+                    Picker("Language", selection: $s.language) {
+                        Text("跟随系统 / System").tag("system")
+                        Text("简体中文").tag("zh-Hans")
+                        Text("繁體中文").tag("zh-Hant")
+                        Text("English (US)").tag("en-US")
+                        Text("English (UK)").tag("en-GB")
+                        Text("日本語").tag("ja")
+                        Text("한국어").tag("ko")
+                        Text("Français").tag("fr")
+                        Text("Français (Canada)").tag("fr-CA")
+                        Text("Deutsch").tag("de")
+                        Text("Italiano").tag("it")
+                        Text("Español").tag("es")
+                        Text("Español (Latinoamérica)").tag("es-419")
+                        Text("Nederlands").tag("nl")
+                        Text("Português (Portugal)").tag("pt-PT")
+                        Text("Русский").tag("ru")
+                    }
+                    caption("仅更改游戏内语言，下次点 Play 生效。Launcher language is unchanged.")
+                }
                 Section("Multiplayer") {
                     Picker("Mode", selection: $s.network) {
                         Text("Off").tag("off")
@@ -344,7 +371,7 @@ struct LauncherView: View {
                 Button("Import game files") { picking = true }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
-                Text("Import prod.keys, the base game and update .nsp files and the Firmware folder (+DLC)/put them in On My iPhone")
+                Text("Import prod.keys, the base game and update .nsp files (+DLC/Firmware)/put them in On My iPhone")
                     .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
             if let e = files.error { Text(e).foregroundStyle(.red).font(.callout).multilineTextAlignment(.center) }

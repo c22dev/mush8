@@ -179,6 +179,8 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
     }
 
     eprintln!("[loader] {} imports resolved to logging stubs", UNIMPL.lock().unwrap().len());
+    crate::resource_compat::patch_missing_avatar_job(&mods)?;
+    crate::display::install(&mods)?;
 
     let freq: u64;
     unsafe { std::arch::asm!("mrs {}, cntfrq_el0", out(reg) freq) };
