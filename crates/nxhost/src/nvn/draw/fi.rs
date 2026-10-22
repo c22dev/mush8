@@ -132,6 +132,7 @@ fn create(w: usize, h: usize, color: MTLPixelFormat) -> Option<Setup> {
     cb.renderCommandEncoderWithDescriptor(&desc)?.endEncoding();
     cb.commit();
     eprintln!("[metalfx] interpolating {w}x{h}");
+    gfx::request_high_refresh();
     Some(setup)
 }
 
@@ -139,7 +140,7 @@ fn create(w: usize, h: usize, color: MTLPixelFormat) -> Option<Setup> {
 /// with a 3D scene are in.
 pub fn frame(st: &mut State, window: &Shared<Texture>) -> Option<Shared<Texture>> {
     let depths = std::mem::take(&mut st.depths);
-    if gfx::INTERP_OFF.load(std::sync::atomic::Ordering::Relaxed) {
+    if gfx::INTERP_OFF.load(std::sync::atomic::Ordering::Relaxed) || !gfx::high_refresh() {
         st.prev = None;
         return None;
     }

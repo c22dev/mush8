@@ -37,6 +37,21 @@ pub fn wait_foreground() {
     });
 }
 
+/// Asks for the display's top refresh rate: on its own, ProMotion keeps a Metal layer at 60 Hz.
+pub fn request_high_refresh() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Relaxed) {
+        return;
+    }
+    dispatch2::DispatchQueue::main().exec_async(|| {
+        let Some(view) = root_view() else { return };
+        let link = unsafe { objc2_quartz_core::CADisplayLink::displayLinkWithTarget_selector(&view, objc2::sel!(nxDisplayFrame:)) };
+        link.setPreferredFrameRateRange(objc2_quartz_core::CAFrameRateRange { minimum: 80.0, maximum: 120.0, preferred: 120.0 });
+        unsafe { link.addToRunLoop_forMode(&objc2_foundation::NSRunLoop::mainRunLoop(), objc2_foundation::NSRunLoopCommonModes) };
+        std::mem::forget(link);
+    });
+}
+
 pub(super) fn root_view() -> Option<Retained<UIView>> {
     UI.with(|ui| ui.borrow().as_ref().and_then(|ui| ui.window.rootViewController()).and_then(|vc| vc.view()))
 }
@@ -71,6 +86,9 @@ define_class!(
         fn layer_class() -> &'static AnyClass {
             CAMetalLayer::class()
         }
+
+        #[unsafe(method(nxDisplayFrame:))]
+        fn display_frame(&self, _link: &NSObject) {}
 
         #[unsafe(method(layoutSubviews))]
         fn layout_subviews(&self) {
@@ -170,6 +188,7 @@ fn connect(scene: &UIWindowScene, mtm: MainThreadMarker) {
     let frame = UICoordinateSpace::bounds(&*window);
     let (view, layer) = metal_view(scene, &window, mtm);
     let _ = LAYER.set(Shared(layer));
+    super::MAX_FPS.store(scene.screen().maximumFramesPerSecond() as u32, Relaxed);
 
     let label = text_label(mtm, frame, "Starting…");
     super::touch::install(&view, mtm);
