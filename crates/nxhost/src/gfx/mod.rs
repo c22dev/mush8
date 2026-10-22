@@ -9,7 +9,20 @@ pub mod overlay;
 mod touch;
 
 #[cfg(target_os = "ios")]
-pub use ios::{run_app, set_touch_controls, wait_foreground};
+pub use ios::{request_high_refresh, run_app, set_touch_controls, wait_foreground};
+
+#[cfg(target_os = "macos")]
+pub fn request_high_refresh() {}
+
+/// The game screen's top refresh rate, 0 until known.
+static MAX_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Whether the screen can show two images per game frame. At 60 Hz the second one would hold the game up to half
+/// speed; Low Power Mode caps ProMotion at 60 Hz.
+pub fn high_refresh() -> bool {
+    let fps = MAX_FPS.load(std::sync::atomic::Ordering::Relaxed);
+    (fps == 0 || fps >= 100) && !objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled()
+}
 
 #[cfg(target_os = "macos")]
 pub fn set_touch_controls(_visible: bool) {}
@@ -171,6 +184,9 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
     window.makeKeyAndOrderFront(None);
     if std::env::var_os("NX_WINDOWED").is_none() {
         window.toggleFullScreen(None);
+    }
+    if let Some(screen) = window.screen() {
+        MAX_FPS.store(screen.maximumFramesPerSecond() as u32, std::sync::atomic::Ordering::Relaxed);
     }
     let win = window.clone();
     let swallow = block2::RcBlock::new(move |e: std::ptr::NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
