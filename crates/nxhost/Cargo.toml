@@ -24,6 +24,7 @@ objc2-foundation = "0.3.2"
 objc2-core-haptics = { version = "0.3.2", default-features = false, features = ["std", "CHHapticDeviceCapability", "CHHapticEngine", "CHHapticEvent", "CHHapticParameter", "CHHapticPattern", "CHHapticPatternPlayer"] }
 objc2-game-controller = "0.3.2"
 objc2-metal = "0.3.2"
+objc2-metal-fx = "0.3.2"
 objc2-quartz-core = "0.3.2"
 bcdec_rs = "0.2.0"
 image-webp = "0.2.4"

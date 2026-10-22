@@ -134,7 +134,13 @@ final class Settings: ObservableObject {
     @Published var browserPads = false
     @Published var handheld = false
     @Published var uhd = false
+    @Published var qhd = false
     @Published var split60 = true
+    @Published var interpolate = false
+    @Published var metalHUD = false
+    @Published var supersample = true
+    @Published var fullRes = false
+    @Published var hqShadows = false
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
@@ -166,7 +172,13 @@ final class Settings: ObservableObject {
         browserPads = j["browser_pads"] as? Bool ?? false
         handheld = j["handheld"] as? Bool ?? false
         uhd = j["uhd"] as? Bool ?? false
+        qhd = j["qhd"] as? Bool ?? false
         split60 = j["split60"] as? Bool ?? true
+        interpolate = j["frame_interpolation"] as? Bool ?? false
+        metalHUD = j["metal_hud"] as? Bool ?? false
+        supersample = j["supersample"] as? Bool ?? true
+        fullRes = j["full_res_3d"] as? Bool ?? false
+        hqShadows = j["hq_shadows"] as? Bool ?? false
         fillScreen = j["aspect"] as? String != "16:9"
         hudAtEdges = j["hud"] as? String != "center"
         hudScale = j["hud_scale"] as? Double ?? 1.0
@@ -184,7 +196,9 @@ final class Settings: ObservableObject {
             "folder": folder, "keys": keys, "base": base, "update": update, "dlc": dlc, "network": network,
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
             "prewarm_pipelines": prewarm, "rumble": rumble, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
-            "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
+            "handheld": handheld, "uhd": uhd, "qhd": qhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
+            "frame_interpolation": interpolate, "metal_hud": metalHUD, "supersample": supersample, "full_res_3d": fullRes,
+            "hq_shadows": hqShadows,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
             "disabled_mods": disabledMods,
         ]
@@ -215,8 +229,13 @@ final class Settings: ObservableObject {
         env["NX_MOTION"] = motion ? "1" : "0"
         env["NX_PHONE_PADS"] = phonePads ? "1" : "0"
         if phonePads && browserPads { env["NX_BROWSER_PADS"] = "1" }
-        if handheld { env["NX_HANDHELD"] = "1" } else if uhd { env["NX_4K"] = "1" }
+        if handheld { env["NX_HANDHELD"] = "1" } else if uhd { env["NX_4K"] = "1" } else if qhd { env["NX_1440P"] = "1" }
         if split60 { env["NX_SPLIT60"] = "1" }
+        if #available(macOS 26, *), interpolate { env["NX_METALFX"] = "1" }
+        if metalHUD { env["MTL_HUD_ENABLED"] = "1" }
+        if !supersample { env["NX_SUPERSAMPLE"] = "0" }
+        if fullRes { env["NX_FULL_RES"] = "1" }
+        if hqShadows { env["NX_HQ_SHADOWS"] = "1" }
         if fillScreen { env["NX_ASPECT"] = "auto" }
         if !hudAtEdges { env["NX_HUD"] = "center" }
         if hudScale != 1 { env["NX_HUD_SCALE"] = String(hudScale) }
@@ -497,12 +516,20 @@ struct LauncherView: View {
 
     var settingsSection: some View {
         Section("Settings") {
-            Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1 })) {
+            Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : s.qhd ? 3 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1; s.qhd = $0 == 3 })) {
                 Text("Docked (1080p)").tag(0)
+                Text("Docked (1440p)").tag(3)
                 Text("Docked (4K)").tag(1)
                 Text("Handheld (720p)").tag(2)
             }
-            Toggle(isOn: $s.split60) { labeled("60 fps split screen", "3 or 4 players get every screen drawn each frame, needs a fast GPU") }
+            Toggle(isOn: $s.supersample) { labeled("Supersampling", "When the console mode is bigger than the screen (4K on a 1440p display), the image is filtered down to the screen for smooth edges") }
+            Toggle(isOn: $s.fullRes) { labeled("Full resolution 3D", "The game draws its 3D scene at 75% of the console mode and scales it up. This draws it at 100%") }
+            Toggle(isOn: $s.hqShadows) { labeled("High quality shadows", "Shadow maps at twice the size (2048 or 3072 instead of 1024 or 1536): sharper shadow edges") }
+            Toggle(isOn: $s.split60) { labeled("Full frame rate split screen", "With 3 or 4 players the game draws each screen only every other frame (30 fps). This draws all of them every frame: 60 fps, or 120 with 120 fps on. Needs a fast GPU") }
+            if #available(macOS 26, *) {
+                Toggle(isOn: $s.interpolate) { labeled("120 fps", "MetalFX makes an in-between image for every frame. Set the display to 120 Hz, Cmd+I switches it off and on while playing. 3 or 4 players need full frame rate split screen for 120 fps on every screen") }
+            }
+            Toggle(isOn: $s.metalHUD) { labeled("Performance HUD", "Shows Metal's frame rate and GPU time over the game") }
             Picker(selection: $s.fillScreen) {
                 Text("16:9").tag(false)
                 Text("Fill screen").tag(true)
