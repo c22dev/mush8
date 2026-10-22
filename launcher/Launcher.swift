@@ -2,8 +2,21 @@
 // Constantin Clerc (c22dev) - 0.1
 import AppKit
 import Combine
+import Metal
+import MetalFX
 import SwiftUI
 import SystemConfiguration
+
+/// 120 fps needs a GPU MetalFX can interpolate on (macOS 26).
+let canInterpolate: Bool = {
+    guard #available(macOS 26, *), let device = MTLCreateSystemDefaultDevice() else { return false }
+    return MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
+}()
+
+/// The fastest refresh rate any connected display runs at right now.
+func fastestDisplay() -> Int {
+    NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60
+}
 
 func nspKind(_ url: URL) -> String? {
     guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -231,7 +244,7 @@ final class Settings: ObservableObject {
         if phonePads && browserPads { env["NX_BROWSER_PADS"] = "1" }
         if handheld { env["NX_HANDHELD"] = "1" } else if uhd { env["NX_4K"] = "1" } else if qhd { env["NX_1440P"] = "1" }
         if split60 { env["NX_SPLIT60"] = "1" }
-        if #available(macOS 26, *), interpolate { env["NX_METALFX"] = "1" }
+        if canInterpolate && interpolate { env["NX_METALFX"] = "1" }
         if metalHUD { env["MTL_HUD_ENABLED"] = "1" }
         if !supersample { env["NX_SUPERSAMPLE"] = "0" }
         if fullRes { env["NX_FULL_RES"] = "1" }
@@ -526,8 +539,12 @@ struct LauncherView: View {
             Toggle(isOn: $s.fullRes) { labeled("Full resolution 3D", "The game draws its 3D scene at 75% of the console mode and scales it up. This draws it at 100%") }
             Toggle(isOn: $s.hqShadows) { labeled("High quality shadows", "Shadow maps at twice the size (2048 or 3072 instead of 1024 or 1536): sharper shadow edges") }
             Toggle(isOn: $s.split60) { labeled("Full frame rate split screen", "With 3 or 4 players the game draws each screen only every other frame (30 fps). This draws all of them every frame: 60 fps, or 120 with 120 fps on. Needs a fast GPU") }
-            if #available(macOS 26, *) {
+            if canInterpolate {
                 Toggle(isOn: $s.interpolate) { labeled("120 fps", "MetalFX makes an in-between image for every frame. Set the display to 120 Hz, Cmd+I switches it off and on while playing. 3 or 4 players need full frame rate split screen for 120 fps on every screen") }
+                if s.interpolate && fastestDisplay() < 100 {
+                    Text("No display runs at 120 Hz right now (System Settings > Displays > Refresh rate): the game stays at 60 fps")
+                        .font(.caption).foregroundStyle(.orange)
+                }
             }
             Toggle(isOn: $s.metalHUD) { labeled("Performance HUD", "Shows Metal's frame rate and GPU time over the game") }
             Picker(selection: $s.fillScreen) {
