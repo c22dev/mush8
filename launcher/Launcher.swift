@@ -13,11 +13,6 @@ let canInterpolate: Bool = {
     return MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
 }()
 
-/// The fastest refresh rate any connected display runs at right now.
-func fastestDisplay() -> Int {
-    NSScreen.screens.map(\.maximumFramesPerSecond).max() ?? 60
-}
-
 func nspKind(_ url: URL) -> String? {
     guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? h.close() }
@@ -540,11 +535,7 @@ struct LauncherView: View {
             Toggle(isOn: $s.hqShadows) { labeled("High quality shadows", "Shadow maps at twice the size (2048 or 3072 instead of 1024 or 1536): sharper shadow edges") }
             Toggle(isOn: $s.split60) { labeled("Full frame rate split screen", "With 3 or 4 players the game draws each screen only every other frame (30 fps). This draws all of them every frame: 60 fps, or 120 with 120 fps on. Needs a fast GPU") }
             if canInterpolate {
-                Toggle(isOn: $s.interpolate) { labeled("120 fps", "MetalFX makes an in-between image for every frame. Set the display to 120 Hz, Cmd+I switches it off and on while playing. 3 or 4 players need full frame rate split screen for 120 fps on every screen") }
-                if s.interpolate && fastestDisplay() < 100 {
-                    Text("No display runs at 120 Hz right now (System Settings > Displays > Refresh rate): the game stays at 60 fps")
-                        .font(.caption).foregroundStyle(.orange)
-                }
+                Toggle(isOn: $s.interpolate) { labeled("120 fps", "MetalFX makes an in-between image for every frame. A 60 or 144 Hz display switches to 120 Hz while playing, if it can. Cmd+I switches it off and on while playing. 3 or 4 players need full frame rate split screen for 120 fps on every screen") }
             }
             Toggle(isOn: $s.metalHUD) { labeled("Performance HUD", "Shows Metal's frame rate and GPU time over the game") }
             Picker(selection: $s.fillScreen) {

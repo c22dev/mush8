@@ -248,6 +248,9 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
         window.toggleFullScreen(None);
     }
     if let Some(screen) = window.screen() {
+        if std::env::var("NX_METALFX").is_ok_and(|v| v == "1") {
+            refresh_120(&screen);
+        }
         MAX_FPS.store(screen.maximumFramesPerSecond() as u32, std::sync::atomic::Ordering::Relaxed);
     }
     let win = window.clone();
@@ -586,6 +589,66 @@ pub fn present_frames(texs: &[&Texture], flip: bool) {
 
 /// Cmd+I switches frame interpolation off and on while playing, to compare.
 pub static INTERP_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Frame interpolation shows 120 images a second, which a 144 Hz display can't space evenly: while the game runs,
+/// such a display switches to its 120 Hz mode at the same resolution, if it has one. macOS switches it back when
+/// Mush8 quits.
+#[cfg(target_os = "macos")]
+fn refresh_120(screen: &objc2_app_kit::NSScreen) {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
+        fn CGDisplayCopyAllDisplayModes(display: u32, options: *const c_void) -> *const c_void;
+        fn CGDisplayModeGetRefreshRate(mode: *const c_void) -> f64;
+        fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetHeight(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetPixelHeight(mode: *const c_void) -> usize;
+        fn CGBeginDisplayConfiguration(config: *mut *mut c_void) -> i32;
+        fn CGConfigureDisplayWithDisplayMode(config: *mut c_void, display: u32, mode: *const c_void, options: *const c_void) -> i32;
+        fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, i: isize) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+    const FOR_APP_ONLY: u32 = 0;
+    let Some(id) = screen.deviceDescription().objectForKey(&NSString::from_str("NSScreenNumber")) else { return };
+    let Ok(id) = id.downcast::<objc2_foundation::NSNumber>() else { return };
+    let display = id.unsignedIntValue();
+    unsafe {
+        let cur = CGDisplayCopyDisplayMode(display);
+        if cur.is_null() {
+            return;
+        }
+        let hz = CGDisplayModeGetRefreshRate(cur);
+        let size = |m| (CGDisplayModeGetWidth(m), CGDisplayModeGetHeight(m), CGDisplayModeGetPixelWidth(m), CGDisplayModeGetPixelHeight(m));
+        let want = size(cur);
+        CFRelease(cur);
+        if hz == 0.0 || (hz / 120.0 - (hz / 120.0).round()).abs() < 0.01 {
+            return;
+        }
+        let modes = CGDisplayCopyAllDisplayModes(display, std::ptr::null());
+        if modes.is_null() {
+            return;
+        }
+        let found = (0..CFArrayGetCount(modes))
+            .map(|i| CFArrayGetValueAtIndex(modes, i))
+            .find(|&m| size(m) == want && (CGDisplayModeGetRefreshRate(m) - 120.0).abs() < 0.5);
+        match found {
+            Some(mode) => {
+                let mut config = std::ptr::null_mut();
+                if CGBeginDisplayConfiguration(&mut config) == 0 {
+                    CGConfigureDisplayWithDisplayMode(config, display, mode, std::ptr::null());
+                    let r = CGCompleteDisplayConfiguration(config, FOR_APP_ONLY);
+                    eprintln!("[gfx] display at {hz:.0} Hz: {} 120 Hz while playing", if r == 0 { "switched to" } else { "could not switch to" });
+                }
+            }
+            None => eprintln!("[gfx] display at {hz:.0} Hz has no 120 Hz mode: 120 fps will judder"),
+        }
+        CFRelease(modes);
+    }
+}
 
 /// The game window's height in pixels.
 pub fn screen_height() -> Option<f64> {
