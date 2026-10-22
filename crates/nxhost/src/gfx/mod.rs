@@ -3,12 +3,26 @@
 #[cfg(target_os = "ios")]
 mod ios;
 pub mod bc;
+pub mod downscale;
 pub mod overlay;
 #[cfg(target_os = "ios")]
 mod touch;
 
 #[cfg(target_os = "ios")]
-pub use ios::{run_app, set_touch_controls, wait_foreground};
+pub use ios::{request_high_refresh, run_app, set_touch_controls, wait_foreground};
+
+#[cfg(target_os = "macos")]
+pub fn request_high_refresh() {}
+
+/// The game screen's top refresh rate, 0 until known.
+static MAX_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Whether the screen can show two images per game frame. At 60 Hz the second one would hold the game up to half
+/// speed; Low Power Mode caps ProMotion at 60 Hz.
+pub fn high_refresh() -> bool {
+    let fps = MAX_FPS.load(std::sync::atomic::Ordering::Relaxed);
+    (fps == 0 || fps >= 100) && !objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled()
+}
 
 #[cfg(target_os = "macos")]
 pub fn set_touch_controls(_visible: bool) {}
@@ -171,6 +185,12 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
     if std::env::var_os("NX_WINDOWED").is_none() {
         window.toggleFullScreen(None);
     }
+    if let Some(screen) = window.screen() {
+        if std::env::var("NX_METALFX").is_ok_and(|v| v == "1") {
+            refresh_120(&screen);
+        }
+        MAX_FPS.store(screen.maximumFramesPerSecond() as u32, std::sync::atomic::Ordering::Relaxed);
+    }
     let win = window.clone();
     let swallow = block2::RcBlock::new(move |e: std::ptr::NonNull<objc2_app_kit::NSEvent>| -> *mut objc2_app_kit::NSEvent {
         let ev = unsafe { e.as_ref() };
@@ -178,6 +198,10 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
             match ev.charactersIgnoringModifiers().map(|c| c.to_string().to_lowercase()).as_deref() {
                 Some("q" | "w") => std::process::exit(0),
                 Some("f") if !ev.isARepeat() => win.toggleFullScreen(None),
+                Some("i") if !ev.isARepeat() => {
+                    let off = !INTERP_OFF.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("[host] frame interpolation {}", if off { "off" } else { "on" });
+                }
                 _ => {}
             }
         }
@@ -408,10 +432,11 @@ pub fn set_crop(x: i32, y: i32, w: i32, h: i32) {
 
 fn present_params(tex: &Texture, flip: bool) -> (PresentParams, f64) {
     let (tw, th) = (tex.width().max(1) as f32, tex.height().max(1) as f32);
+    let k = downscale::scale();
     let [x, y, w, h] = CROP.lock().unwrap().map_or([0.0, 0.0, tw, th], |c| {
-        let x = (c[0] as f32).min(tw - 1.0);
-        let y = (c[1] as f32).min(th - 1.0);
-        [x, y, (c[2] as f32).min(tw - x), (c[3] as f32).min(th - y)]
+        let x = (c[0] as f32 * k).min(tw - 1.0);
+        let y = (c[1] as f32 * k).min(th - 1.0);
+        [x, y, (c[2] as f32 * k).min(tw - x), (c[3] as f32 * k).min(th - y)]
     });
     let p = PresentParams {
         flip: flip as u32,
@@ -425,6 +450,12 @@ fn present_params(tex: &Texture, flip: bool) -> (PresentParams, f64) {
 }
 
 pub fn present(tex: &Texture, flip: bool) {
+    present_frames(&[tex], flip);
+}
+
+/// Shows `texs` within one game frame: the first right away, the others spread evenly across the frame. Frame
+/// interpolation passes its in-between images first and the real frame last.
+pub fn present_frames(texs: &[&Texture], flip: bool) {
     #[cfg(target_os = "ios")]
     if !ios::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -449,38 +480,114 @@ pub fn present(tex: &Texture, flip: bool) {
     if layer.0.drawableSize() != size {
         layer.0.setDrawableSize(size);
     }
-    let Some(drawable) = layer.0.nextDrawable() else { return };
-    let g = gpu();
-    let Some(cb) = g.queue.0.commandBuffer() else { return };
-    let desc = MTLRenderPassDescriptor::new();
-    let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
-    att.setTexture(Some(&drawable.texture()));
-    att.setLoadAction(MTLLoadAction::Clear);
-    att.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
-    att.setStoreAction(MTLStoreAction::Store);
-    if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&desc) {
-        let (params, aspect) = present_params(tex, flip);
-        let aspect = aspect * crate::aspect::stretch();
-        ASPECT.store(aspect.to_bits(), std::sync::atomic::Ordering::Relaxed);
-        enc.setViewport(letterbox(aspect, size.width, size.height));
-        enc.setRenderPipelineState(&g.present.0);
-        unsafe {
-            let p = std::ptr::NonNull::from(&params).cast();
-            enc.setVertexBytes_length_atIndex(p, size_of::<PresentParams>(), 0);
-            enc.setFragmentBytes_length_atIndex(p, size_of::<PresentParams>(), 0);
-            enc.setFragmentTexture_atIndex(Some(tex), 0);
-            enc.setFragmentSamplerState_atIndex(Some(&g.sampler.0), 0);
-            enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+    let texs = if turbo { &texs[texs.len() - 1..] } else { texs };
+    let gap = FRAME.as_secs_f64() * interval.max(1) as f64 / texs.len() as f64;
+    let t0 = objc2_quartz_core::CACurrentMediaTime();
+    for (i, tex) in texs.iter().enumerate() {
+        let Some(drawable) = layer.0.nextDrawable() else { return };
+        let g = gpu();
+        let Some(cb) = g.queue.0.commandBuffer() else { return };
+        let desc = MTLRenderPassDescriptor::new();
+        let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+        att.setTexture(Some(&drawable.texture()));
+        att.setLoadAction(MTLLoadAction::Clear);
+        att.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
+        att.setStoreAction(MTLStoreAction::Store);
+        if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&desc) {
+            let (params, aspect) = present_params(tex, flip);
+            let aspect = aspect * crate::aspect::stretch();
+            ASPECT.store(aspect.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            enc.setViewport(letterbox(aspect, size.width, size.height));
+            enc.setRenderPipelineState(&g.present.0);
+            unsafe {
+                let p = std::ptr::NonNull::from(&params).cast();
+                enc.setVertexBytes_length_atIndex(p, size_of::<PresentParams>(), 0);
+                enc.setFragmentBytes_length_atIndex(p, size_of::<PresentParams>(), 0);
+                enc.setFragmentTexture_atIndex(Some(*tex), 0);
+                enc.setFragmentSamplerState_atIndex(Some(&g.sampler.0), 0);
+                enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+            }
+            enc.endEncoding();
         }
-        enc.endEncoding();
+        let d: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
+        if texs.len() > 1 {
+            cb.presentDrawable_atTime(d, t0 + gap * i as f64);
+        } else if interval == 0 || turbo {
+            cb.presentDrawable(d);
+        } else {
+            cb.presentDrawable_afterMinimumDuration(d, interval as f64 / 60.0);
+        }
+        cb.commit();
     }
-    let d: &ProtocolObject<dyn MTLDrawable> = ProtocolObject::from_ref(&*drawable);
-    if interval == 0 || turbo {
-        cb.presentDrawable(d);
-    } else {
-        cb.presentDrawable_afterMinimumDuration(d, interval as f64 / 60.0);
+}
+
+/// Cmd+I switches frame interpolation off and on while playing, to compare.
+pub static INTERP_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Frame interpolation shows 120 images a second, which a 144 Hz display can't space evenly: while the game runs,
+/// such a display switches to its 120 Hz mode at the same resolution, if it has one. macOS switches it back when
+/// Mush8 quits.
+#[cfg(target_os = "macos")]
+fn refresh_120(screen: &objc2_app_kit::NSScreen) {
+    use std::ffi::c_void;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGDisplayCopyDisplayMode(display: u32) -> *const c_void;
+        fn CGDisplayCopyAllDisplayModes(display: u32, options: *const c_void) -> *const c_void;
+        fn CGDisplayModeGetRefreshRate(mode: *const c_void) -> f64;
+        fn CGDisplayModeGetWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetHeight(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetPixelWidth(mode: *const c_void) -> usize;
+        fn CGDisplayModeGetPixelHeight(mode: *const c_void) -> usize;
+        fn CGBeginDisplayConfiguration(config: *mut *mut c_void) -> i32;
+        fn CGConfigureDisplayWithDisplayMode(config: *mut c_void, display: u32, mode: *const c_void, options: *const c_void) -> i32;
+        fn CGCompleteDisplayConfiguration(config: *mut c_void, option: u32) -> i32;
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, i: isize) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
     }
-    cb.commit();
+    const FOR_APP_ONLY: u32 = 0;
+    let Some(id) = screen.deviceDescription().objectForKey(&NSString::from_str("NSScreenNumber")) else { return };
+    let Ok(id) = id.downcast::<objc2_foundation::NSNumber>() else { return };
+    let display = id.unsignedIntValue();
+    unsafe {
+        let cur = CGDisplayCopyDisplayMode(display);
+        if cur.is_null() {
+            return;
+        }
+        let hz = CGDisplayModeGetRefreshRate(cur);
+        let size = |m| (CGDisplayModeGetWidth(m), CGDisplayModeGetHeight(m), CGDisplayModeGetPixelWidth(m), CGDisplayModeGetPixelHeight(m));
+        let want = size(cur);
+        CFRelease(cur);
+        if hz == 0.0 || (hz / 120.0 - (hz / 120.0).round()).abs() < 0.01 {
+            return;
+        }
+        let modes = CGDisplayCopyAllDisplayModes(display, std::ptr::null());
+        if modes.is_null() {
+            return;
+        }
+        let found = (0..CFArrayGetCount(modes))
+            .map(|i| CFArrayGetValueAtIndex(modes, i))
+            .find(|&m| size(m) == want && (CGDisplayModeGetRefreshRate(m) - 120.0).abs() < 0.5);
+        match found {
+            Some(mode) => {
+                let mut config = std::ptr::null_mut();
+                if CGBeginDisplayConfiguration(&mut config) == 0 {
+                    CGConfigureDisplayWithDisplayMode(config, display, mode, std::ptr::null());
+                    let r = CGCompleteDisplayConfiguration(config, FOR_APP_ONLY);
+                    eprintln!("[gfx] display at {hz:.0} Hz: {} 120 Hz while playing", if r == 0 { "switched to" } else { "could not switch to" });
+                }
+            }
+            None => eprintln!("[gfx] display at {hz:.0} Hz has no 120 Hz mode: 120 fps will judder"),
+        }
+        CFRelease(modes);
+    }
+}
+
+/// The game window's height in pixels.
+pub fn screen_height() -> Option<f64> {
+    let layer = LAYER.get()?;
+    Some(layer.0.bounds().size.height * layer.0.contentsScale())
 }
 
 static ASPECT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

@@ -30,6 +30,7 @@ impl Replay<'_> {
         }
         let (Some(vs), Some(fs)) = (vs, fs) else { return Err("program without vertex+fragment stages") };
         self.ensure_pass()?;
+        self.pass.as_mut().unwrap().draws += 1;
         let targets = self.pass.as_ref().unwrap().targets.clone();
         let (mut uints, mut sints) = (0, 0);
         for (i, f) in targets.colors.iter().enumerate() {

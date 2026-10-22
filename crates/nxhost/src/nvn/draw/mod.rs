@@ -2,6 +2,7 @@
 // Constantin Clerc (c22dev) - 0.1
 mod copy;
 mod exec;
+mod fi;
 mod shaders;
 mod state;
 mod textures;
@@ -50,6 +51,7 @@ struct Engine {
     sampled: HashMap<textures::TexKey, Shared<gfx::Texture>>,
     touched: Vec<(textures::TexKey, Shared<gfx::Texture>)>,
     clears: Vec<PendingClear>,
+    fi: fi::State,
 }
 
 struct PendingClear {
@@ -88,6 +90,8 @@ struct Pass {
     keys: Vec<(textures::TexKey, (u32, u32))>,
     fresh: bool,
     fixed: Option<EncState>,
+    depth_tex: Option<(textures::TexKey, Shared<gfx::Texture>)>,
+    draws: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -320,6 +324,9 @@ impl Replay<'_> {
     fn end_pass(&mut self) {
         if let Some(p) = self.pass.take() {
             p.enc.endEncoding();
+            if *fi::ON {
+                self.e.fi.pass_drawn(p.depth_tex.as_ref(), p.draws);
+            }
             for (k, sub) in &p.keys {
                 if let Some((_, src)) = self.e.textures.cached(k) {
                     for dst in self.e.textures.aliases_of(k) {
@@ -423,8 +430,10 @@ impl Replay<'_> {
             let mut dfmt = None;
             let mut stencil = false;
             let mut depth_sub = (0, 0);
+            let mut depth_tex = None;
             if let Some(b) = self.e.depth.clone() {
                 if let Some((k, t)) = self.e.textures.get(&b, true) {
+                    depth_tex = Some((k, t.clone()));
                     depth_sub = super::objects::view_subresource(&b);
                     stencil = gfx::has_stencil(k.format);
                     dfmt = Some(t.0.pixelFormat());
@@ -455,7 +464,18 @@ impl Replay<'_> {
             }
             let z = &gfx::gpu().zeros.0;
             enc.useResource_usage_stages(ProtocolObject::from_ref(&**z), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
-            self.pass = Some(Pass { enc, targets: Targets { colors: fmts, depth: dfmt, stencil }, size, heap: 0, chunks: chunks.len(), fresh, keys, fixed: None });
+            self.pass = Some(Pass {
+                enc,
+                targets: Targets { colors: fmts, depth: dfmt, stencil },
+                size,
+                heap: 0,
+                chunks: chunks.len(),
+                fresh,
+                keys,
+                fixed: None,
+                depth_tex,
+                draws: 0,
+            });
         }
         Ok(())
     }
@@ -656,14 +676,23 @@ pub fn present(texture: u64) {
     objc2::rc::autoreleasepool(|_| {
         let b = super::objects::texture(texture).map(|t| t.builder);
         let Some(b) = b else { return };
-        let t = {
+        let (t, mid) = {
             let mut e = ENGINE.lock().unwrap();
             e.forget_dead();
-            e.textures.get(&b, true)
+            let t = e.textures.get(&b, true).map(|(k, t)| (k, gfx::downscale::fit(&t)));
+            let mid = match &t {
+                Some((_, t)) if *fi::ON && !gfx::turbo() => fi::frame(&mut e.fi, t),
+                _ => None,
+            };
+            (t, mid)
         };
         if let Some((_, t)) = t {
             dump_at(&t);
-            crate::kernel::blocking(|| gfx::present(&t.0, !UPPER_LEFT.load(Relaxed)));
+            let flip = !UPPER_LEFT.load(Relaxed);
+            match mid {
+                Some(mid) => crate::kernel::blocking(|| gfx::present_frames(&[&mid.0, &t.0], flip)),
+                None => crate::kernel::blocking(|| gfx::present(&t.0, flip)),
+            }
         }
     });
 }
