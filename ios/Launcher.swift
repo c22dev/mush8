@@ -33,6 +33,7 @@ final class Settings: ObservableObject {
     @Published var prewarm = true
     @Published var rumble = true
     @Published var spatial = true
+    @Published var interpolate = false
     @Published var backgroundCompile = true
     @Published var motion = false
     @Published var handheld = true
@@ -55,6 +56,7 @@ final class Settings: ObservableObject {
         prewarm = json["prewarm_pipelines"] as? Bool ?? true
         rumble = json["rumble"] as? Bool ?? true
         spatial = json["spatial_audio"] as? Bool ?? true
+        interpolate = json["frame_interpolation"] as? Bool ?? false
         backgroundCompile = json["background_compile"] as? Bool ?? true
         motion = json["motion_controls"] as? Bool ?? false
         handheld = json["handheld"] as? Bool ?? true
@@ -73,6 +75,7 @@ final class Settings: ObservableObject {
         json["prewarm_pipelines"] = prewarm
         json["rumble"] = rumble
         json["spatial_audio"] = spatial
+        json["frame_interpolation"] = interpolate
         json["background_compile"] = backgroundCompile
         json["motion"] = nil
         json["motion_controls"] = motion
@@ -295,6 +298,11 @@ struct LauncherView: View {
                     }
                 } footer: {
                     Text("Handheld renders at 720p: lighter on the GPU and battery")
+                }
+                Section {
+                    Toggle("120 fps", isOn: $s.interpolate)
+                } footer: {
+                    Text("MetalFX makes an in-between image for every frame, on ProMotion displays. Uses more GPU and battery")
                 }
                 Section {
                     Picker("Screen", selection: $s.fillScreen) {
