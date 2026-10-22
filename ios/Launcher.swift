@@ -1,11 +1,20 @@
 // Mush8 - Launcher.swift
 // Constantin Clerc (c22dev) - 0.1
 import Combine
+import Metal
+import MetalFX
 import Network
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import os
+
+/// 120 fps needs a ProMotion display and a GPU MetalFX can interpolate on.
+@MainActor func canInterpolate() -> Bool {
+    let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+    guard let screen, screen.maximumFramesPerSecond >= 100, let device = MTLCreateSystemDefaultDevice() else { return false }
+    return MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
+}
 
 func nspKind(_ url: URL) -> String? {
     guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -299,10 +308,12 @@ struct LauncherView: View {
                 } footer: {
                     Text("Handheld renders at 720p: lighter on the GPU and battery")
                 }
-                Section {
-                    Toggle("120 fps", isOn: $s.interpolate)
-                } footer: {
-                    Text("MetalFX makes an in-between image for every frame, on ProMotion displays. Uses more GPU and battery")
+                if canInterpolate() {
+                    Section {
+                        Toggle("120 fps", isOn: $s.interpolate)
+                    } footer: {
+                        Text("MetalFX makes an in-between image for every frame. Uses more GPU and battery, and stays at 60 in Low Power Mode")
+                    }
                 }
                 Section {
                     Picker("Screen", selection: $s.fillScreen) {
