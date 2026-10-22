@@ -23,6 +23,7 @@ Mush8 will then asks for them : on macOS pick the folder holding them in the lau
 - Apple Silicon Mac, macOS 14 or later
 - Rust toolchain
 - Xcode 26 or later
+- recommended : the Metal Toolchain, which Xcode 26 downloads separately (`xcodebuild -downloadComponent MetalToolchain`). Without it, Prepare can't compile the game's shaders ahead of time : the game still runs, but compiles them while you play, so new scenes (a race start for example) show black or missing graphics for a moment
 
 For iOS, also :
 - `rustup` with `rustup toolchain install 1.98.1` and `rustup target add aarch64-apple-ios --toolchain 1.98.1`

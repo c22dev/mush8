@@ -164,12 +164,16 @@ func checks(_ s: Settings) -> [Check] {
     let fm = FileManager.default
     let f = s.folderURL
     let has = { (p: String) in fm.fileExists(atPath: f.appendingPathComponent(p).path) }
+    let shaderIndex = f.appendingPathComponent("work/shader_cache.noindex/index.tsv").path
+    let shaders = (try? fm.attributesOfItem(atPath: shaderIndex)[.size] as? Int) ?? nil
     return [
         Check(id: "Base Game", ok: has(s.base), detail: has(s.base) ? s.base : "not found"),
         Check(id: "Update", ok: has(s.update), detail: has(s.update) ? s.update : "not found"),
         Check(id: "Booster Course Pass", ok: has(s.dlc), detail: has(s.dlc) ? s.dlc : "none", optional: true),
         Check(id: "Game code for this Mac", ok: gameCodeReady(in: f), detail: "work/v-upd/patched"),
-        Check(id: "Precompiled shaders", ok: has("work/shader_cache.noindex/index.tsv"), detail: "work/shader_cache.noindex"),
+        // an empty index means the Metal Toolchain was missing: the game still runs, compiling shaders while it plays
+        Check(id: "Precompiled shaders", ok: (shaders ?? 0) > 0,
+              detail: shaders == 0 ? "none, install the Metal Toolchain and Prepare again" : "work/shader_cache.noindex", optional: shaders == 0),
         Check(id: "Console Keys", ok: has(s.keys), detail: has(s.keys) ? s.keys : "not found"),
         Check(id: "Firmware", ok: has("Firmware"), detail: has("Firmware") ? "Firmware/" : "not found"),
     ]
@@ -370,8 +374,12 @@ struct LauncherView: View {
         }
     }
 
-    func caption(_ text: String) -> some View {
-        Text(text).font(.caption).foregroundStyle(.secondary)
+    // an option's name with its explanation under it, in the option's own row
+    func labeled(_ title: String, _ detail: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+            if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+        }
     }
 
     var settingsSection: some View {
@@ -381,11 +389,12 @@ struct LauncherView: View {
                 Text("Docked (4K)").tag(1)
                 Text("Handheld (720p)").tag(2)
             }
-            Toggle("60 fps split screen", isOn: $s.split60)
-            caption("3 or 4 players get every screen drawn each frame, needs a fast GPU")
-            Picker("Screen", selection: $s.fillScreen) {
+            Toggle(isOn: $s.split60) { labeled("60 fps split screen", "3 or 4 players get every screen drawn each frame, needs a fast GPU") }
+            Picker(selection: $s.fillScreen) {
                 Text("16:9").tag(false)
                 Text("Fill screen").tag(true)
+            } label: {
+                labeled("Screen", "Fill screen widens the race to the whole display, menus and HUD keep their proportions")
             }
             if s.fillScreen {
                 Picker("HUD", selection: $s.hudAtEdges) {
@@ -398,38 +407,38 @@ struct LauncherView: View {
                 Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
                 Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
             }
-            caption("Fill screen widens the race to the whole display, menus and HUD keep their proportions")
-            Picker("Multiplayer", selection: $s.network) {
+            Picker(selection: $s.network) {
                 Text("Off").tag("off")
                 Text("LAN").tag("lan")
                 Text("Online").tag("lanplay")
                 Text("Wireless (nearby)").tag("wireless")
+            } label: {
+                labeled("Multiplayer", s.network == "wireless" ? "Nearby Mush8 clients can join (keep Wi-Fi on)" : nil)
             }
             switch s.network {
             case "lan":
-                Picker("Network", selection: $s.lanInterface) {
+                Picker(selection: $s.lanInterface) {
                     Text("Automatic").tag("")
                     ForEach(sys.nets, id: \.self) { n in Text("\(n.name) · \(n.ip)").tag(n.name) }
+                } label: {
+                    labeled("Network", "Switch and Mush8 players on the same network can join")
                 }
-                caption("Switch and Mush8 players on the same network can join")
             case "lanplay":
-                TextField("Server (host:port)", text: $s.lanPlayServer)
-                caption("Lan-Play.com clients on the same server can join")
-            case "wireless":
-                caption("Nearby Mush8 clients can join (keep Wi-Fi on)")
+                TextField(text: $s.lanPlayServer, prompt: Text("host:port")) {
+                    labeled("Server", "Lan-Play.com clients on the same server can join")
+                }
             default:
                 EmptyView()
             }
             Toggle("Pipeline archive", isOn: $s.pipelineArchive)
             Toggle("Prewarm pipelines", isOn: $s.prewarm)
-            Toggle("Background shader compiling", isOn: $s.backgroundCompile)
-            caption("Builds the game's graphics pipelines in the background at startup")
+            Toggle(isOn: $s.backgroundCompile) { labeled("Background shader compiling", "Builds the game's graphics pipelines in the background at startup") }
             Toggle("Vibration", isOn: $s.rumble)
             Toggle("Motion controls", isOn: $s.motion)
-            Toggle("Spatial audio", isOn: $s.spatial)
-            caption("Plays the game's 5.1 mix in spatial audio. Choose Fixed or Head Tracked for AirPods in Control Center")
-            Toggle("iPhone controllers", isOn: $s.phonePads)
-            caption("iPhones on this network join as players with Mush8's \"Use as a controller\"")
+            Toggle(isOn: $s.spatial) {
+                labeled("Spatial audio", "Plays the game's 5.1 mix in spatial audio. Choose Fixed or Head Tracked for AirPods in Control Center")
+            }
+            Toggle(isOn: $s.phonePads) { labeled("iPhone controllers", "iPhones on this network join as players with Mush8's \"Use as a controller\"") }
         }
     }
 
