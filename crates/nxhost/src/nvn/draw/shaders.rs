@@ -533,8 +533,17 @@ pub fn precompile(romfs: nxfs::storage::DynStorage, modules: &[std::path::PathBu
             });
         }
     });
-    std::fs::write(format!("{}/index.tsv", aot_dir()), index.into_inner().unwrap())?;
-    eprintln!("[shader] precompiled {} shaders in {:.0} s", sources.len(), t0.elapsed().as_secs_f32());
+    let index = index.into_inner().unwrap();
+    if index.is_empty() && !sources.is_empty() {
+        eprintln!(
+            "[shader] warning: no shader was precompiled, so the game compiles them while it plays (black or missing \
+             graphics for a moment in new scenes). Install the Metal Toolchain with `xcodebuild -downloadComponent \
+             MetalToolchain`, then Prepare again"
+        );
+    } else {
+        eprintln!("[shader] precompiled {} shaders in {:.0} s", sources.len(), t0.elapsed().as_secs_f32());
+    }
+    std::fs::write(format!("{}/index.tsv", aot_dir()), index)?;
     if sdk == "iphoneos" || std::env::var_os("NX_PIPELINE_ARCHIVE").is_none() {
         return Ok(());
     }

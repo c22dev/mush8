@@ -164,12 +164,16 @@ func checks(_ s: Settings) -> [Check] {
     let fm = FileManager.default
     let f = s.folderURL
     let has = { (p: String) in fm.fileExists(atPath: f.appendingPathComponent(p).path) }
+    let shaderIndex = f.appendingPathComponent("work/shader_cache.noindex/index.tsv").path
+    let shaders = (try? fm.attributesOfItem(atPath: shaderIndex)[.size] as? Int) ?? nil
     return [
         Check(id: "Base Game", ok: has(s.base), detail: has(s.base) ? s.base : "not found"),
         Check(id: "Update", ok: has(s.update), detail: has(s.update) ? s.update : "not found"),
         Check(id: "Booster Course Pass", ok: has(s.dlc), detail: has(s.dlc) ? s.dlc : "none", optional: true),
         Check(id: "Game code for this Mac", ok: gameCodeReady(in: f), detail: "work/v-upd/patched"),
-        Check(id: "Precompiled shaders", ok: has("work/shader_cache.noindex/index.tsv"), detail: "work/shader_cache.noindex"),
+        // an empty index means the Metal Toolchain was missing: the game still runs, compiling shaders while it plays
+        Check(id: "Precompiled shaders", ok: (shaders ?? 0) > 0,
+              detail: shaders == 0 ? "none, install the Metal Toolchain and Prepare again" : "work/shader_cache.noindex", optional: shaders == 0),
         Check(id: "Console Keys", ok: has(s.keys), detail: has(s.keys) ? s.keys : "not found"),
         Check(id: "Firmware", ok: has("Firmware"), detail: has("Firmware") ? "Firmware/" : "not found"),
     ]
