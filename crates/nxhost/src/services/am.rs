@@ -10,7 +10,7 @@ const NO_MESSAGES: u32 = 0x680;
 const NO_DATA_IN_CHANNEL: u32 = 0x2680;
 const NOT_AVAILABLE: u32 = 0x480;
 const APPLET_ERROR: u32 = 0x0E;
-const CONTROLLER_SUPPORT_CANCELED: u32 = 202 | 3101 << 9;
+const CONTROLLER_SUPPORT_CANCELED: u32 = 2;
 
 const FOCUS_STATE_CHANGED: u32 = 15;
 const IN_FOCUS: u8 = 1;
@@ -234,7 +234,6 @@ impl Service for LibraryAppletCreator {
                     id,
                     input: Mutex::new(Vec::new()),
                     output: Mutex::new(VecDeque::new()),
-                    result: std::sync::atomic::AtomicU32::new(0),
                     state_event: new_event(false),
                     out_event: new_event(false),
                 }));
@@ -250,7 +249,6 @@ struct LibraryApplet {
     id: u32,
     input: Mutex<Vec<Vec<u8>>>,
     output: Mutex<VecDeque<Vec<u8>>>,
-    result: std::sync::atomic::AtomicU32,
     state_event: u32,
     out_event: u32,
 }
@@ -266,13 +264,7 @@ impl LibraryApplet {
     fn run(&self) {
         let input = self.input.lock().unwrap().clone();
         let out = match self.id {
-            APPLET_CONTROLLER => {
-                let out = controller_applet(&input);
-                if out.is_none() {
-                    self.result.store(CONTROLLER_SUPPORT_CANCELED, Relaxed);
-                }
-                out
-            }
+            APPLET_CONTROLLER => Some(controller_applet(&input)),
             APPLET_WEB | APPLET_OFFLINE_WEB => Some(web_applet(&input)),
             APPLET_ERROR => {
                 for (i, d) in input.iter().enumerate() {
@@ -304,8 +296,7 @@ impl Service for LibraryApplet {
             0 => rsp.copy_handles.push(self.state_event),
             1 => rsp.data.push(1),
             10 => self.run(),
-            20 | 25 | 50 | 60 | 150 => {}
-            30 => return self.result.load(Relaxed),
+            20 | 25 | 30 | 50 | 60 | 150 => {}
             100 | 103 => {
                 if let Some(d) = req.in_objects.first().and_then(|o| o.storage_bytes()) {
                     self.input.lock().unwrap().push(d);
@@ -323,14 +314,18 @@ impl Service for LibraryApplet {
     }
 }
 
-fn controller_applet(input: &[Vec<u8>]) -> Option<Vec<u8>> {
+// ControllerSupportResultInfo: player count, selected id, result. The applet itself always succeeds,
+// the SDK turns result 2 into the canceled result it returns to the game
+fn controller_applet(input: &[Vec<u8>]) -> Vec<u8> {
     let arg = input.get(2);
     let min = arg.and_then(|a| a.first()).map_or(1, |&v| (v as i8).max(1)) as usize;
     let max = arg.and_then(|a| a.get(1)).map_or(4, |&v| (v as i8).clamp(1, 8)) as usize;
     crate::input::FILL_TO.store(0, Relaxed);
+    let mut out = vec![0u8; 0xC];
     let Some(connected) = crate::kernel::blocking(|| crate::gfx::overlay::controller_screen(min, max)) else {
         eprintln!("[am] controller applet: canceled");
-        return None;
+        out[8..12].copy_from_slice(&CONTROLLER_SUPPORT_CANCELED.to_le_bytes());
+        return out;
     };
     let players = connected.clamp(min, max.max(min));
     eprintln!("[am] controller applet: {connected} controllers connected, the game asks {min}..={max} players: {players}");
@@ -339,10 +334,8 @@ fn controller_applet(input: &[Vec<u8>]) -> Option<Vec<u8>> {
         crate::input::FILL_TO.store(players, Relaxed);
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let mut out = vec![0u8; 0xC];
     out[0] = players as u8;
-    out[4..8].copy_from_slice(&0u32.to_le_bytes());
-    Some(out)
+    out
 }
 
 const HELP_URL: &str = "https://github.com/c22dev/Mush8";
