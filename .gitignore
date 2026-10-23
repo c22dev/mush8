@@ -1,0 +1,11 @@
+/build/
+/target/
+
+# General macOS files
+.DS_Store
+.localized
+__MACOSX/
+.AppleDouble
+.LSOverride
+Icon[
+]
