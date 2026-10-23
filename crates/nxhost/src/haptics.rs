@@ -46,9 +46,18 @@ const RUMBLE_MS: u32 = 1000;
 const RESEND: Duration = Duration::from_millis(500);
 
 #[cfg(target_os = "macos")]
+// Like the yuzu-family SDL driver (citron sdl_driver.cpp RumblePlay): the low band drives the
+// low-frequency motor and the high band the high-frequency one, weaker as the frequency rises.
+// The strength stays linear, without the emulator's boost of weak values.
 fn sdl_strength(v: [Value; 2]) -> (u16, u16) {
-    let s = |v: Value| (v.feel().0.clamp(0.0, 1.0) * 65535.0).round() as u16;
-    (s(v[0]), s(v[1]))
+    let band = |amp: fn(&Value) -> (f32, f32), start: f32, width: f32| {
+        let s = v.iter().map(amp).map(|(a, f)| {
+            let a = if a.is_nan() { 0.0 } else { a.clamp(0.0, 1.0) };
+            a * (1.0 - (f - start).max(0.0) / width).max(0.3)
+        });
+        (s.fold(0.0, f32::max) * 65535.0).round() as u16
+    };
+    (band(|v| (v.amp_low, v.freq_low), 140.0, 400.0), band(|v| (v.amp_high, v.freq_high), 200.0, 700.0))
 }
 
 #[cfg(target_os = "macos")]
@@ -287,11 +296,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdl_strength_sides() {
+    fn sdl_strength_follows_bands() {
+        let v = |amp_low, freq_low, amp_high, freq_high| Value { amp_low, freq_low, amp_high, freq_high };
         assert_eq!(sdl_strength([Value::IDLE, Value::IDLE]), (0, 0));
-        let full = Value { amp_low: 1.0, ..Value::IDLE };
-        assert_eq!(sdl_strength([full, Value::IDLE]), (65535, 0));
-        assert_eq!(sdl_strength([Value::IDLE, full]), (0, 65535));
+        // low band drives the low-frequency motor, high band the high-frequency one, linearly
+        assert_eq!(sdl_strength([v(1.0, 140.0, 0.0, 200.0), Value::IDLE]), (65535, 0));
+        assert_eq!(sdl_strength([Value::IDLE, v(0.0, 140.0, 1.0, 200.0)]), (0, 65535));
+        assert_eq!(sdl_strength([v(0.25, 140.0, 0.0, 200.0), Value::IDLE]), (16384, 0));
+        // both sides share one pad: the stronger side wins per band
+        assert_eq!(sdl_strength([v(0.5, 140.0, 0.0, 200.0), v(0.25, 140.0, 0.0, 200.0)]), (32768, 0));
+        // higher frequencies feel weaker, down to 30%
+        assert_eq!(sdl_strength([v(1.0, 540.0, 1.0, 900.0), Value::IDLE]), (19661, 19661));
+        assert_eq!(sdl_strength([v(1.0, 340.0, 0.0, 200.0), Value::IDLE]), (32768, 0));
         let nan = Value { amp_low: f32::NAN, ..Value::IDLE };
         assert_eq!(sdl_strength([nan, nan]), (0, 0));
     }
