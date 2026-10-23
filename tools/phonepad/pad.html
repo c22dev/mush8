@@ -1,0 +1,276 @@
+<!doctype html>
+<!-- Mush8 - pad.html -->
+<!-- Touch controller served by phonepad.py: Normal mode has every button, Drive mode only steering, item, drift and A -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mush8 Pad">
+<title>Mush8 Pad</title>
+<style>
+  :root { --bg: #121212; --btn: #2b2b2b; --edge: #454545; --text: #e8e8e8; --on: #e60012; --on-edge: #ff5a66; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, system-ui, sans-serif; overflow: hidden;
+    touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  /* exposes the notch inset to edgeX(), every control is position: fixed so this moves nothing */
+  body { padding-left: env(safe-area-inset-left); box-sizing: border-box; }
+  #top {
+    position: fixed; top: calc(env(safe-area-inset-top) + 6px); left: 50%; transform: translateX(-50%);
+    display: flex; gap: 8px; align-items: center; z-index: 2;
+  }
+  #status { font-size: 13px; padding: 4px 12px; border-radius: 12px; background: #1f1f1f; white-space: nowrap; }
+  #status.ok { background: #14361f; color: #8fe0a8; }
+  .seg { display: flex; align-items: center; background: #1f1f1f; border: 1px solid var(--edge); border-radius: 12px; padding: 2px; }
+  .seg button {
+    border: 0; background: none; color: #aaa; font-size: 13px; font-weight: 600;
+    padding: 4px 12px; border-radius: 10px; font-family: inherit;
+  }
+  .seg button.active { background: #3a3a3a; color: #fff; }
+  .seg .label { font-size: 12px; color: #888; padding: 0 4px 0 8px; }
+  .btn {
+    position: fixed; display: flex; align-items: center; justify-content: center;
+    width: 17vmin; height: 17vmin; border-radius: 50%; transform: translate(-50%, -50%);
+    background: var(--btn); border: 2px solid var(--edge); font-size: 6.5vmin; font-weight: 700; color: var(--text);
+  }
+  .btn.on { background: var(--on); border-color: var(--on-edge); color: #fff; }
+  .shoulder { width: 20vw; height: 14vmin; border-radius: 4vmin; font-size: 5vmin; transform: none; }
+  .small { width: 11vmin; height: 11vmin; font-size: 6vmin; }
+  .rect { transform: none; border-radius: 5vmin; flex-direction: column; gap: 1vmin; }
+  .rect small { font-size: 3.4vmin; font-weight: 500; opacity: .6; }
+  #ZL { left: calc(env(safe-area-inset-left) + 3vw); top: 4vmin; }
+  #L  { left: calc(env(safe-area-inset-left) + 3vw); top: 21vmin; }
+  #ZR { right: calc(env(safe-area-inset-right) + 3vw); top: 4vmin; }
+  #R  { right: calc(env(safe-area-inset-right) + 3vw); top: 21vmin; }
+  #MINUS { left: 43vw; top: 27vmin; }
+  #PLUS  { left: 57vw; top: 27vmin; }
+  #X { left: calc(80vw - env(safe-area-inset-right)); top: calc(64vh - 17vmin); }
+  #Y { left: calc(80vw - env(safe-area-inset-right) - 17vmin); top: 64vh; }
+  #A { left: calc(80vw - env(safe-area-inset-right) + 17vmin); top: 64vh; }
+  #B { left: calc(80vw - env(safe-area-inset-right)); top: calc(64vh + 17vmin); }
+  #ITEM  { right: calc(env(safe-area-inset-right) + 3vw); bottom: 54vmin; width: 30vw; height: 24vmin; font-size: 6vmin; }
+  #DRIFT { right: calc(env(safe-area-inset-right) + 3vw); bottom: calc(env(safe-area-inset-bottom) + 6vmin); width: 30vw; height: 44vmin; font-size: 7.5vmin; }
+  #START { left: 50vw; bottom: calc(env(safe-area-inset-bottom) + 5vmin); transform: translateX(-50%); width: 22vmin; height: 12vmin; font-size: 4.5vmin; border-radius: 4vmin; }
+  body.drive #PLUS { left: 50vw; top: 48vh; }
+  .drive-only { display: none; }
+  body.drive .drive-only { display: flex; }
+  body.drive .normal-only { display: none; }
+  /* the floating stick's centre never spawns left of this line */
+  #edge {
+    display: none; position: fixed; top: 22vmin; bottom: 4vmin; width: 0;
+    border-left: 2px dashed #3a3a3a; pointer-events: none;
+  }
+  body.drive.float #edge { display: block; }
+  #base {
+    position: fixed; width: 36vmin; height: 36vmin; border-radius: 50%; transform: translate(-50%, -50%);
+    border: 2px solid var(--edge); background: #1b1b1b; pointer-events: none;
+  }
+  body.drive #base { width: 44vmin; height: 44vmin; }
+  #knob {
+    position: absolute; left: 50%; top: 50%; width: 16vmin; height: 16vmin; border-radius: 50%;
+    margin: -8vmin 0 0 -8vmin; background: #3a3a3a; border: 2px solid #5a5a5a;
+  }
+  #hint { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 6px); left: 50%; transform: translateX(-50%); font-size: 11px; opacity: .45; white-space: nowrap; }
+  #rotate {
+    display: none; position: fixed; inset: 0; z-index: 10; background: var(--bg);
+    align-items: center; justify-content: center; text-align: center; font-size: 20px; padding: 24px;
+  }
+  @media (orientation: portrait) { #rotate { display: flex; } }
+</style>
+</head>
+<body>
+<div id="top">
+  <div id="status" data-t="connecting">Connecting…</div>
+  <div id="modes" class="ui seg">
+    <button data-mode="normal" data-t="normal">Normal</button>
+    <button data-mode="drive" data-t="drive">Drive</button>
+  </div>
+  <div id="sticks" class="ui seg drive-only">
+    <span class="label">Stick</span>
+    <button data-stick="fixed" data-t="fixed">Fixed</button>
+    <button data-stick="float" data-t="float">Floating</button>
+  </div>
+</div>
+<div id="edge"></div>
+<div id="base"><div id="knob"></div></div>
+<div class="btn shoulder normal-only" id="ZL" data-b="ZL">ZL</div>
+<div class="btn shoulder normal-only" id="L" data-b="L">L</div>
+<div class="btn shoulder normal-only" id="ZR" data-b="ZR">ZR</div>
+<div class="btn shoulder normal-only" id="R" data-b="R">R</div>
+<div class="btn small normal-only" id="MINUS" data-b="MINUS">−</div>
+<div class="btn small" id="PLUS" data-b="PLUS">+</div>
+<div class="btn normal-only" id="X" data-b="X">X</div>
+<div class="btn normal-only" id="Y" data-b="Y">Y</div>
+<div class="btn normal-only" id="A" data-b="A">A</div>
+<div class="btn normal-only" id="B" data-b="B">B</div>
+<div class="btn rect drive-only" id="ITEM" data-b="L">Item<small>L</small></div>
+<div class="btn rect drive-only" id="DRIFT" data-b="R">Drift<small>R</small></div>
+<div class="btn rect drive-only" id="START" data-b="A">Start · A</div>
+<div id="hint" class="normal-only" data-t="hint">Left half: stick · A accelerate · B brake · L item · R drift</div>
+<div id="rotate" data-t="rotate">Turn your phone sideways 🔄</div>
+<script>
+const T = {
+  en: {
+    connecting: 'Connecting…', normal: 'Normal', drive: 'Drive', fixed: 'Fixed', float: 'Floating',
+    hint: 'Left half: stick · A accelerate · B brake · L item · R drift', rotate: 'Turn your phone sideways 🔄',
+    waiting: 'Waiting for Mush8…', player: 'Player ', full: 'No free player slot', lost: 'Disconnected, reconnecting…',
+    stale: 'Waiting for Mush8… (is the game running?)',
+  },
+  de: {
+    connecting: 'Verbinde …', normal: 'Normal', drive: 'Fahren', fixed: 'Fest', float: 'Beweglich',
+    hint: 'Linke Hälfte: Stick · A Gas · B Bremse · L Item · R Drift', rotate: 'Bitte das Handy quer halten 🔄',
+    waiting: 'Warte auf Mush8 …', player: 'Spieler ', full: 'Kein freier Spieler-Platz', lost: 'Getrennt, verbinde neu …',
+    stale: 'Warte auf Mush8 … (läuft das Spiel?)',
+  },
+};
+const lang = (navigator.language || 'en').toLowerCase().startsWith('de') ? 'de' : 'en';
+const t = T[lang];
+document.documentElement.lang = lang;
+for (const el of document.querySelectorAll('[data-t]')) el.textContent = t[el.dataset.t];
+// bits from crates/nxhost/src/input.rs
+const BITS = { A: 1, B: 2, X: 4, Y: 8, L: 64, R: 128, ZL: 256, ZR: 512, PLUS: 1024, MINUS: 2048 };
+const base = document.getElementById('base'), knob = document.getElementById('knob'), statusEl = document.getElementById('status');
+const edge = document.getElementById('edge');
+const held = new Map();
+let stickId = null, origin = null, lx = 0, ly = 0, buttons = 0, sent = '', lastAck = 0, player = null, ws = null;
+let mode = 'normal', stickStyle = 'fixed';
+
+const radius = () => Math.min(innerWidth, innerHeight) * (mode === 'drive' ? 0.22 : 0.18);
+// leftmost spot for the floating stick's centre, so a full left turn still fits on screen
+const edgeX = () => base.offsetWidth / 2 + 12 + (parseFloat(getComputedStyle(document.body).paddingLeft) || 0);
+function restStick() {
+  base.style.left = (innerWidth * 0.2) + 'px';
+  base.style.top = (innerHeight * (mode === 'drive' ? 0.6 : 0.64)) + 'px';
+  knob.style.transform = '';
+  edge.style.left = edgeX() + 'px';
+}
+function bitAt(x, y) {
+  const el = document.elementFromPoint(x, y);
+  const b = el && el.closest('.btn');
+  return b ? BITS[b.dataset.b] : 0;
+}
+function moveStick(t) {
+  const r = radius();
+  let dx = t.clientX - origin.x, dy = t.clientY - origin.y;
+  const d = Math.hypot(dx, dy);
+  if (d > r) { dx *= r / d; dy *= r / d; }
+  knob.style.transform = `translate(${dx}px, ${dy}px)`;
+  lx = dx / r; ly = -dy / r;
+}
+// the switches at the top get normal clicks, everything else is handled as raw touches
+const onUi = (e) => e.target.closest && e.target.closest('.ui');
+function start(e) {
+  if (onUi(e)) return;
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const bit = bitAt(t.clientX, t.clientY);
+    if (!bit && stickId === null && t.clientX < innerWidth * 0.55) {
+      stickId = t.identifier;
+      if (mode === 'drive' && stickStyle === 'fixed') {
+        // a touch that lands too far left still steers left
+        const r = base.getBoundingClientRect();
+        origin = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+      } else {
+        origin = { x: t.clientX, y: t.clientY };
+        if (mode === 'drive') {
+          const half = base.offsetHeight / 2 + 8;
+          origin.x = Math.max(origin.x, edgeX());
+          origin.y = Math.min(Math.max(origin.y, half), innerHeight - half);
+        }
+        base.style.left = origin.x + 'px';
+        base.style.top = origin.y + 'px';
+      }
+      moveStick(t);
+    } else {
+      held.set(t.identifier, bit);
+    }
+  }
+  update();
+}
+function move(e) {
+  if (onUi(e)) return;
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === stickId) moveStick(t);
+    else if (held.has(t.identifier)) held.set(t.identifier, bitAt(t.clientX, t.clientY));
+  }
+  update();
+}
+function end(e) {
+  if (onUi(e)) return;
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    if (t.identifier === stickId) { stickId = null; lx = ly = 0; restStick(); }
+    held.delete(t.identifier);
+  }
+  update();
+}
+function update() {
+  const before = buttons;
+  buttons = 0;
+  for (const b of held.values()) buttons |= b;
+  if (buttons & ~before && navigator.vibrate) navigator.vibrate(8);
+  for (const el of document.querySelectorAll('.btn')) el.classList.toggle('on', !!(buttons & BITS[el.dataset.b]));
+  send(false);
+}
+function setMode(m) {
+  mode = m === 'drive' ? 'drive' : 'normal';
+  document.body.classList.toggle('drive', mode === 'drive');
+  for (const b of document.querySelectorAll('#modes button')) b.classList.toggle('active', b.dataset.mode === mode);
+  // let go of everything, so no button stays pressed across the switch
+  held.clear();
+  stickId = null; lx = ly = 0;
+  restStick();
+  update();
+  try { localStorage.setItem('mush8pad-mode', mode); } catch (e) {}
+}
+for (const b of document.querySelectorAll('#modes button')) b.addEventListener('click', () => setMode(b.dataset.mode));
+function setStickStyle(s) {
+  stickStyle = s === 'float' ? 'float' : 'fixed';
+  document.body.classList.toggle('float', stickStyle === 'float');
+  for (const b of document.querySelectorAll('#sticks button')) b.classList.toggle('active', b.dataset.stick === stickStyle);
+  if (stickId !== null) { stickId = null; lx = ly = 0; }
+  restStick();
+  update();
+  try { localStorage.setItem('mush8pad-stick', stickStyle); } catch (e) {}
+}
+for (const b of document.querySelectorAll('#sticks button')) b.addEventListener('click', () => setStickStyle(b.dataset.stick));
+function send(force) {
+  const s = buttons + ',' + lx.toFixed(3) + ',' + ly.toFixed(3);
+  if ((force || s !== sent) && ws && ws.readyState === 1) { ws.send(s); sent = s; }
+}
+function setStatus(text, ok) { statusEl.textContent = text; statusEl.classList.toggle('ok', !!ok); }
+function connect() {
+  ws = new WebSocket('ws://' + location.host + '/ws');
+  ws.onopen = () => { setStatus(t.waiting); send(true); };
+  ws.onmessage = (m) => {
+    lastAck = Date.now();
+    const p = parseInt(m.data.split(' ')[1], 10);
+    if (p !== player) { player = p; setStatus(p ? t.player + p : t.full, p > 0); }
+  };
+  ws.onclose = () => { player = null; setStatus(t.lost); setTimeout(connect, 1000); };
+}
+// Mush8 drops a controller after 3 s of silence, so keep sending while the page is open
+setInterval(() => {
+  send(true);
+  if (player !== null && Date.now() - lastAck > 2000) { player = null; setStatus(t.stale); }
+}, 50);
+for (const [type, fn] of [['touchstart', start], ['touchmove', move], ['touchend', end], ['touchcancel', end]]) {
+  document.addEventListener(type, fn, { passive: false });
+}
+addEventListener('resize', () => { if (stickId === null) restStick(); });
+let saved = 'normal', savedStick = 'fixed';
+try {
+  saved = localStorage.getItem('mush8pad-mode') || 'normal';
+  savedStick = localStorage.getItem('mush8pad-stick') || 'fixed';
+} catch (e) {}
+setStickStyle(savedStick);
+setMode(saved);
+connect();
+</script>
+</body>
+</html>

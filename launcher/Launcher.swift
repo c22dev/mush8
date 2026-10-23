@@ -3,6 +3,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import SystemConfiguration
 
 func nspKind(_ url: URL) -> String? {
     guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -66,6 +67,8 @@ final class Settings: ObservableObject {
     @Published var backgroundCompile = true
     @Published var motion = false
     @Published var phonePads = true
+    @Published var browserPads = false
+    @Published var padTerminal = false
     @Published var handheld = false
     @Published var uhd = false
     @Published var split60 = true
@@ -95,6 +98,8 @@ final class Settings: ObservableObject {
         backgroundCompile = j["background_compile"] as? Bool ?? true
         motion = j["motion_controls"] as? Bool ?? false
         phonePads = j["phone_pads"] as? Bool ?? true
+        browserPads = j["browser_pads"] as? Bool ?? false
+        padTerminal = j["browser_pads_terminal"] as? Bool ?? false
         handheld = j["handheld"] as? Bool ?? false
         uhd = j["uhd"] as? Bool ?? false
         split60 = j["split60"] as? Bool ?? true
@@ -110,7 +115,8 @@ final class Settings: ObservableObject {
             "folder": folder, "keys": keys, "base": base, "update": update, "dlc": dlc, "network": network,
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
             "prewarm_pipelines": prewarm, "rumble": rumble, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
-            "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads,
+            "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
+            "browser_pads_terminal": padTerminal,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
         ]
         try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
@@ -276,17 +282,62 @@ func systemAvailableMemory() -> UInt64 {
 
 func bytes(_ n: UInt64) -> String { ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .memory) }
 
+// same as phonepad.py: the address of the interface the default route leaves from, nothing is sent
+func lanIP() -> String? {
+    let fd = socket(AF_INET, SOCK_DGRAM, 0)
+    guard fd >= 0 else { return nil }
+    defer { close(fd) }
+    var dst = sockaddr_in()
+    dst.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    dst.sin_family = sa_family_t(AF_INET)
+    dst.sin_port = in_port_t(9).bigEndian
+    inet_pton(AF_INET, "192.0.2.1", &dst.sin_addr)
+    var local = sockaddr_in()
+    var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let connected = withUnsafePointer(to: &dst) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    let named = withUnsafeMutablePointer(to: &local) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) } }
+    guard connected == 0, named == 0 else { return nil }
+    return String(cString: inet_ntoa(local.sin_addr))
+}
+
 final class SystemInfo: ObservableObject {
     @Published var available: UInt64 = availableMemory()
     @Published var nets: [NetInterface] = interfaces()
+    @Published var lan: String? = lanIP()
     private var timer: Timer?
 
     init() {
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             self?.available = availableMemory()
             self?.nets = interfaces()
+            self?.lan = lanIP()
         }
     }
+}
+
+let phonePadHost = "http://\((SCDynamicStoreCopyLocalHostName(nil) as String?) ?? "this-mac").local:8088"
+
+// started right before the exec into the game, which keeps our pid, so the pad stops by itself once the game quits
+func startPhonePad(inTerminal: Bool) {
+    guard let script = Bundle.main.url(forResource: "phonepad", withExtension: nil)?.appendingPathComponent("phonepad.py") else { return }
+    let args = ["/usr/bin/python3", "-I", script.path, "--exit-with-pid", String(getpid())]
+    let p = Process()
+    if inTerminal {
+        // a .command file opens in Terminal without asking for automation access, -g keeps it behind the game
+        let cmd = supportURL.appendingPathComponent("phonepad.command")
+        let line = args.map { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }.joined(separator: " ")
+        try? "#!/bin/sh\nclear\nexec \(line)\n".write(to: cmd, atomically: true, encoding: .utf8)
+        chmod(cmd.path, 0o755)
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-g", "-a", "Terminal", cmd.path]
+    } else {
+        p.executableURL = URL(fileURLWithPath: args[0])
+        p.arguments = Array(args.dropFirst())
+    }
+    try? p.run()
+    if inTerminal { p.waitUntilExit() }
 }
 
 func launch(_ s: Settings) -> String {
@@ -301,6 +352,7 @@ func launch(_ s: Settings) -> String {
         dup2(fd, STDERR_FILENO)
         close(fd)
     }
+    if s.phonePads && s.browserPads { startPhonePad(inTerminal: s.padTerminal) }
     let game = tool("nxhost", in: s.folderURL).path
     var argv: [UnsafeMutablePointer<CChar>?] = ([game] + s.arguments).map { strdup($0) } + [nil]
     execv(game, &argv)
@@ -313,6 +365,7 @@ struct LauncherView: View {
     @StateObject private var prep = Preparer()
     @State private var launchError: String?
     @State private var tick = 0
+    @State private var copied: String?
 
     var body: some View {
         let list = checks(s)
@@ -430,12 +483,44 @@ struct LauncherView: View {
             caption("Plays the game's 5.1 mix in spatial audio. Choose Fixed or Head Tracked for AirPods in Control Center")
             Toggle("iPhone controllers", isOn: $s.phonePads)
             caption("iPhones on this network join as players with Mush8's \"Use as a controller\"")
+            if s.phonePads {
+                Toggle("Browser controllers", isOn: $s.browserPads)
+                if s.browserPads {
+                    addressRow("Phone address", phonePadHost)
+                    addressRow("Or by IP", sys.lan.map { "http://\($0):8088" })
+                    caption("Open one in the phone's browser on the same Wi-Fi, it joins as a player, no app needed. The name stays the same, the IP can change")
+                    Toggle("Show pad events in Terminal", isOn: $s.padTerminal)
+                    caption(s.padTerminal ? "A Terminal window behind the game lists the phones joining and leaving" : "The pad's messages go to the Mush8 log")
+                } else {
+                    caption("Any phone's browser can be a controller, no app needed")
+                }
+            }
         }
     }
 
     var systemSection: some View {
         Section {
             row("Memory available", bytes(sys.available), warn: sys.available < 4 << 30 ? "4 GB of free RAM is recommended" : nil)
+        }
+    }
+
+    func addressRow(_ label: String, _ value: String?) -> some View {
+        HStack {
+            Text(label)
+            Spacer()
+            Text(value ?? "no network").foregroundStyle(.secondary).monospacedDigit().textSelection(.enabled)
+            if let v = value {
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(v, forType: .string)
+                    copied = v
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { if copied == v { copied = nil } }
+                } label: {
+                    Image(systemName: copied == v ? "checkmark" : "doc.on.doc").frame(width: 16)
+                }
+                .buttonStyle(.borderless)
+                .help("Copy")
+            }
         }
     }
 
