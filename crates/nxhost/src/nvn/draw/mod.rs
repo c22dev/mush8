@@ -50,29 +50,26 @@ struct Engine {
     sampled: HashMap<textures::TexKey, Shared<gfx::Texture>>,
     touched: Vec<(textures::TexKey, Shared<gfx::Texture>)>,
     clears: Vec<PendingClear>,
-    incomplete: bool,
+    draws: u32,
+    skipped: u32,
     held: Held,
 }
 
 // A draw is skipped while its shader or pipeline compiles in the background. A frame missing draws can show what a
-// layer was meant to hide (the race behind the loading screen flashing through for a frame), so the last complete
-// image stays on screen instead, for at most MAX frames in a row.
+// layer was meant to hide: the first race frame behind the loading screen loses about a fifth of its draws and the
+// race flashes through, and a white menu fade that loses 4 of its 143 draws turns grey. A frame missing at least 2% of
+// its draws is held back and the last complete image stays on screen. Race frames miss at most about 1% and are
+// shown, and a frame is never held back after a held one, so holding costs at most one repeated frame (16.7 ms at
+// 60 fps).
 #[derive(Default)]
 struct Held {
-    frames: u32,
+    last: bool,
 }
 
 impl Held {
-    const MAX: u32 = 30;
-
-    fn present(&mut self, incomplete: bool) -> bool {
-        if incomplete && self.frames < Self::MAX {
-            self.frames += 1;
-            false
-        } else {
-            self.frames = 0;
-            true
-        }
+    fn present(&mut self, skipped: u32, draws: u32) -> bool {
+        self.last = !self.last && skipped * 50 >= draws.max(1);
+        !self.last
     }
 }
 
@@ -295,8 +292,9 @@ impl Replay<'_> {
                     let _ = r;
                 }
                 Cmd::Draw(d) => {
+                    self.e.draws += 1;
                     if self.draw(d).is_err_and(|e| e.ends_with("compiling")) {
-                        self.e.incomplete = true;
+                        self.e.skipped += 1;
                     }
                 }
             }
@@ -685,8 +683,8 @@ pub fn present(texture: u64) {
         let (t, show) = {
             let mut e = ENGINE.lock().unwrap();
             e.forget_dead();
-            let incomplete = std::mem::take(&mut e.incomplete);
-            (e.textures.get(&b, true), e.held.present(incomplete))
+            let (skipped, draws) = (std::mem::take(&mut e.skipped), std::mem::take(&mut e.draws));
+            (e.textures.get(&b, true), e.held.present(skipped, draws))
         };
         if let Some((_, t)) = t {
             if show {
@@ -845,15 +843,20 @@ mod tests {
     use super::Held;
 
     #[test]
-    fn incomplete_frames_are_held_back_for_a_while() {
+    fn only_frames_missing_many_draws_are_held_back() {
         let mut h = Held::default();
-        assert!(h.present(false));
-        for _ in 0..Held::MAX {
-            assert!(!h.present(true));
-        }
-        assert!(h.present(true), "a frame still missing draws is shown after {} held frames", Held::MAX);
-        assert!(!h.present(true));
-        assert!(h.present(false));
-        assert!(!h.present(true));
+        assert!(h.present(0, 3200));
+        assert!(!h.present(700, 3200), "the race behind the loading screen, missing a fifth of its draws, is held back");
+        assert!(h.present(30, 2500), "a frame missing about 1% of its draws is shown");
+        assert!(h.present(13, 1200), "a race frame missing about 1% of its draws is shown");
+        assert!(!h.present(4, 143), "a menu fade missing 4 of 143 draws turns grey and is held back");
+    }
+
+    #[test]
+    fn never_two_frames_in_a_row_are_held_back() {
+        let mut h = Held::default();
+        assert!(!h.present(700, 3200));
+        assert!(h.present(700, 3200), "the second frame in a row is shown, so a hold costs at most one repeated frame");
+        assert!(!h.present(700, 3200));
     }
 }
