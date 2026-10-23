@@ -13,6 +13,7 @@ mod ipc;
 mod kernel;
 mod loader;
 mod mem;
+mod motion;
 mod movie;
 mod remote;
 mod services;

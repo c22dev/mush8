@@ -121,66 +121,16 @@ fn push_touch(lifo: u64, sampling: u64, touches: &[(u32, f32, f32, u32)]) {
 
 static AT_REST: [std::sync::atomic::AtomicBool; crate::input::MAX_PLAYERS] = [const { std::sync::atomic::AtomicBool::new(true) }; crate::input::MAX_PLAYERS];
 
-#[derive(Clone, Copy)]
-struct Fused {
-    angle: [f32; 3],
-    dir: [[f32; 3]; 3],
-}
-
-impl Default for Fused {
-    fn default() -> Self {
-        Fused { angle: [0.0; 3], dir: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] }
-    }
-}
-
-impl Fused {
-    fn step(&mut self, gyro: [f32; 3], dt: f32) {
-        for i in 0..3 {
-            self.angle[i] += gyro[i] * dt;
-        }
-        let w = gyro.map(|r| r * std::f32::consts::TAU * dt);
-        let theta = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
-        if theta < 1e-7 {
-            return;
-        }
-        let k = w.map(|v| v / theta);
-        let (s, c) = theta.sin_cos();
-        let kx = [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]];
-        let mut r = [[0f32; 3]; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                let kk: f32 = (0..3).map(|m| kx[i][m] * kx[m][j]).sum();
-                r[i][j] = if i == j { 1.0 } else { 0.0 } + s * kx[i][j] + (1.0 - c) * kk;
-            }
-        }
-        let d = self.dir;
-        for i in 0..3 {
-            for j in 0..3 {
-                self.dir[i][j] = (0..3).map(|m| d[i][m] * r[m][j]).sum();
-            }
-        }
-        let norm = |v: [f32; 3]| {
-            let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-6);
-            v.map(|x| x / l)
-        };
-        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-        let x = norm(self.dir[0]);
-        let y = norm(std::array::from_fn(|i| self.dir[1][i] - dot(self.dir[1], x) * x[i]));
-        let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
-        self.dir = [x, y, z];
-    }
-}
-
-fn push_sixaxis(lifo: u64, sampling: u64, m: Option<&crate::input::Motion>, fused: &Fused) {
+fn push_sixaxis(lifo: u64, sampling: u64, m: Option<&crate::input::Motion>, fused: &crate::motion::Fusion) {
     let (tail, e) = lifo_slot(lifo, SIXAXIS_ENTRY);
-    let (accel, gyro) = m.map_or(([0.0, 0.0, -1.0], [0.0; 3]), |m| (m.accel, m.gyro.map(|r| r / std::f32::consts::TAU)));
+    let (accel, gyro) = m.map_or(([0.0, 0.0, -1.0], [0.0; 3]), |m| (m.accel, fused.gyro()));
     write(e, sampling);
     write(e + 0x08, 5_000_000u64);
     write(e + 0x10, sampling);
     write(e + 0x18, accel);
     write(e + 0x24, gyro);
-    write(e + 0x30, fused.angle);
-    write(e + 0x3c, fused.dir);
+    write(e + 0x30, fused.rotation());
+    write(e + 0x3c, fused.orientation());
     write(e + 0x60, m.is_some() as u32);
     lifo_commit(lifo, sampling, tail);
 }
@@ -196,7 +146,7 @@ fn start_input_thread() {
                 let mut pads = crate::input::Pads::new();
                 let mut present = [false; crate::input::MAX_PLAYERS];
                 let mut sampling = 0u64;
-                let mut fused = [Fused::default(); crate::input::MAX_PLAYERS];
+                let mut fused = [crate::motion::Fusion::default(); crate::input::MAX_PLAYERS];
                 let mut moving = [false; crate::input::MAX_PLAYERS];
                 let mut last = std::time::Instant::now();
                 loop {
@@ -226,8 +176,8 @@ fn start_input_thread() {
                             eprintln!("[hid] motion data for player {}", i + 1);
                         }
                         match motion {
-                            Some(m) => fused[i].step(m.gyro.map(|r| r / std::f32::consts::TAU), dt),
-                            None => fused[i] = Fused::default(),
+                            Some(m) => fused[i].update(m.accel, m.gyro.map(|r| r / std::f32::consts::TAU), dt),
+                            None => fused[i] = crate::motion::Fusion::default(),
                         }
                         if present[i] {
                             for l in SIXAXIS_LIFOS {
