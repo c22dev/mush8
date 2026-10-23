@@ -28,24 +28,47 @@ fn fonts() -> &'static Fonts {
         let cfg = super::fs::CONFIG.get().expect("fs not configured");
         let mut entries = Vec::new();
         let mut pos = 0u64;
+        let mut fallback = None;
         for (id, file) in FONTS {
             let data = super::fs::system_data(cfg, id).and_then(|s| {
                 let fs = nxfs::romfs::RomFs::open(s).ok()?;
                 let f = fs.files().into_iter().find(|f| f.path == file)?;
                 fs.storage().read_vec(f.offset, f.size as usize).ok()
             });
-            let Some(data) = data.filter(|d| d.len() > 8 && pos + d.len() as u64 <= SHARED_MEMORY_SIZE) else {
-                eprintln!("[pl] font {file} unavailable");
-                entries.push((0, 0));
+            if let Some(mut data) = data.filter(|d| d.len() > 8 && pos + d.len() as u64 <= SHARED_MEMORY_SIZE) {
+                for (i, b) in data[8..].iter_mut().enumerate() {
+                    *b ^= BFTTF_KEY[i % 4];
+                }
+                unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), (shm.host + pos) as *mut u8, data.len()) };
+                entries.push(((pos + 8) as u32, (data.len() - 8) as u32));
+                pos += data.len() as u64;
                 continue;
-            };
-            let mut data = data;
-            for (i, b) in data[8..].iter_mut().enumerate() {
-                *b ^= BFTTF_KEY[i % 4];
             }
-            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), (shm.host + pos) as *mut u8, data.len()) };
-            entries.push(((pos + 8) as u32, (data.len() - 8) as u32));
-            pos += data.len() as u64;
+
+            eprintln!("[pl] font {file} unavailable");
+            let entry = fallback.get_or_insert_with(|| {
+                #[cfg(target_os = "ios")]
+                let paths = [
+                    "/System/Library/Fonts/CoreUI/SFUI.ttf",
+                    "/System/Library/Fonts/Core/HelveticaNeue.ttc",
+                ];
+                #[cfg(not(target_os = "ios"))]
+                let paths: [&str; 0] = [];
+
+                for path in paths {
+                    let Ok(data) = std::fs::read(path) else { continue };
+                    if data.is_empty() || pos + data.len() as u64 > SHARED_MEMORY_SIZE {
+                        continue;
+                    }
+                    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), (shm.host + pos) as *mut u8, data.len()) };
+                    let entry = (pos as u32, data.len() as u32);
+                    pos += data.len() as u64;
+                    eprintln!("[pl] using iOS system font {path} as fallback");
+                    return entry;
+                }
+                (0, 0)
+            });
+            entries.push(*entry);
         }
         Fonts { shm, entries }
     })

@@ -3,6 +3,7 @@
 use super::super::objects::STATE;
 use crate::gfx::{self, Shared};
 use nxshader::{Interface, TexKind};
+use objc2::runtime::NSObjectProtocol;
 use objc2_foundation::NSString;
 use objc2_metal::*;
 use super::super::fx::{FastMap, FastSet};
@@ -254,7 +255,15 @@ fn compile_inner(blob: &[u8], compute: bool, extra_outputs: u32, uint_targets: u
     }
     let msl = format!("{}{src}", nxshader::prelude());
     let opts = MTLCompileOptions::new();
-    opts.setMathMode(MTLMathMode::Safe);
+    // `mathMode` is newer than iOS 16.  objc2 exposes the SDK method even
+    // when the runtime does not implement it, so guard the selector and use
+    // the older equivalent on the user's iPad.
+    if opts.respondsToSelector(objc2::sel!(setMathMode:)) {
+        opts.setMathMode(MTLMathMode::Safe);
+    } else {
+        #[allow(deprecated)]
+        opts.setFastMathEnabled(false);
+    }
     opts.setPreserveInvariance(true);
     let dev = &gfx::gpu().device.0;
     let lib = match dev.newLibraryWithSource_options_error(&NSString::from_str(&msl), Some(&opts)) {
@@ -279,7 +288,7 @@ fn aot_sdk() -> String {
     std::env::var("NX_SHADER_SDK").unwrap_or_else(|_| "macosx".into())
 }
 
-pub(super) const IOS_MIN: &str = "26.0";
+pub(super) const IOS_MIN: &str = "16.1";
 const GUEST_FILE: &str = "guest.tsv";
 const AOT_BATCH: usize = 64;
 const AOT_FLAGS: [&str; 3] = ["-fmetal-math-mode=safe", "-fpreserve-invariance", "-w"];

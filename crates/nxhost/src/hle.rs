@@ -29,6 +29,7 @@ extern "C" fn abort_plain(cond: *const c_char, func: *const c_char, file: *const
 pub fn table() -> HashMap<&'static str, u64> {
     let mut t: HashMap<&'static str, u64> = HashMap::new();
     t.insert("nvnBootstrapLoader", crate::nvn::bootstrap_loader as *const () as usize as u64);
+    crate::resource_compat::register(&mut t);
     for (name, f) in [
         ("_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_St9__va_list", abort_with_result as *const () as usize),
         ("_ZN2nn4diag6detail9AbortImplEPKcS3_S3_iPKNS_6ResultES3_z", abort_with_result as *const () as usize),

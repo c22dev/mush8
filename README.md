@@ -28,7 +28,7 @@ For iOS, also :
 - `rustup` with `rustup toolchain install 1.98.1` and `rustup target add aarch64-apple-ios --toolchain 1.98.1`
 - `xcodegen` (`brew install xcodegen`)
 - an Apple ID to sign the app on iOS (a free one works), or AltStore / SideStore to install the `.ipa`
-- a device on iOS/macOS 26 or later, with 6 GB of RAM or more (8 GB is comfy)
+- a device on iOS 16.1 or later, with 6 GB of RAM or more (8 GB is comfy)
 
 ## Building
 The easy way :
@@ -64,7 +64,7 @@ Pick a mode in the launcher, under Multiplayer :
 In the game, the main menu then shows LAN Play, Online Play or Wireless Play
 
 ## Controls
-Any controller works (Switch Pro, Joy-Con, DualSense, Xbox...), each one is a player. On macOS the keyboard works too (WASD stick, arrows d-pad, X/Return A, Z/Backspace B, Q/E L/R, 1/3 ZL/ZR, Tab +), on iOS there are touch controls when no controller is connected
+Any controller works (Switch Pro, Joy-Con, DualSense, Xbox...), each one is a player. A hardware keyboard also works on macOS and iOS: W/S are accelerate/brake, A/D steer, arrows are the d-pad, X/Return is A, Z/Backspace is B, C/V are X/Y, Q/E are L/R, 1/3 are ZL/ZR, Tab is +, - is -, and I/J/K/L control the right stick. On iOS, touch controls are hidden while a hardware keyboard is connected and return automatically when it disconnects.
 
 The touchscreen works too : tap the game on iOS, click it on macOS
 

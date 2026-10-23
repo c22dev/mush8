@@ -1878,6 +1878,7 @@ fn translate_code(sph: &Sph, code: &[u8], extra_outputs: u32, uint_targets: u32,
     g.line("return epilogue();");
 
     let stage = sph.stage;
+    let epilogue: String;
     if stage == Stage::Vertex {
         g.iface.outputs |= extra_outputs;
     }
@@ -1983,15 +1984,11 @@ fn translate_code(sph: &Sph, code: &[u8], extra_outputs: u32, uint_targets: u32,
                 writeln!(out, "    uint4 a{i} = fetch_attr(res, {i}u, vid, iid);").unwrap();
             }
         }
-
-        out.push_str(
-            "    auto epilogue = [&]() -> VOut {\n        VOut r = o;\n        if (res.flags & 1u) r.pos.y = -r.pos.y;\n        if (res.flags & 2u) r.pos.z = (r.pos.z + r.pos.w) * 0.5f;\n        return r;\n    };\n",
-        );
+        epilogue = "        VOut r = o;\n        if (res.flags & 1u) r.pos.y = -r.pos.y;\n        if (res.flags & 2u) r.pos.z = (r.pos.z + r.pos.w) * 0.5f;\n        return r;".into();
     } else if stage == Stage::Compute {
-        out.push_str("    auto epilogue = [&]() {};\n");
+        epilogue = "        return;".into();
     } else {
-
-        let mut s = String::from("    auto epilogue = [&]() -> FOut {\n        FOut r;\n");
+        let mut s = String::from("        FOut r;\n");
         let mut base = 0;
         for rt in 0..8 {
             let m = sph.omap_targets >> (rt * 4) & 0xF;
@@ -2029,7 +2026,7 @@ fn translate_code(sph: &Sph, code: &[u8], extra_outputs: u32, uint_targets: u32,
         if sph.omap_targets & 0xF != 0 && (uint_targets | sint_targets) & 1 == 0 {
             s.push_str("        if ((res.flags & 4u) != 0u && !fcmp(res.alpha_func, r.c0.w, res.alpha_ref)) discard_fragment();\n");
         }
-        s.push_str("        return r;\n    };\n");
+        s.push_str("        return r;");
 
         let declared: String = out.clone();
         for r in &g.regs {
@@ -2037,11 +2034,14 @@ fn translate_code(sph: &Sph, code: &[u8], extra_outputs: u32, uint_targets: u32,
                 writeln!(out, "    uint r{r} = 0u;").unwrap();
             }
         }
-        out.push_str(&s);
+        epilogue = s;
     }
     writeln!(out, "    uint pc = {}u;\n    for (;;) {{\n    switch (pc) {{", prog.insts[0].addr).unwrap();
-    out.push_str(&g.body);
-    out.push_str("    default:\n        return epilogue();\n    }\n    }\n}\n");
+    let inline_epilogue = format!("{{\n{epilogue}\n        }}");
+    out.push_str(&g.body.replace("return epilogue();", &inline_epilogue));
+    out.push_str("    default:\n");
+    out.push_str(&epilogue);
+    out.push_str("\n    }\n    }\n}\n");
     let mut interface = g.iface;
     if stage == Stage::Fragment && interface.color_targets == 0 && !interface.writes_depth {
         interface.color_targets = 1;

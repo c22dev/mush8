@@ -9,6 +9,7 @@ const FIRST_SEGMENT: u64 = 0x1_0400_0000;
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(embedded_modules)");
+    println!("cargo::rustc-check-cfg=cfg(missing_mii_profile)");
     println!("cargo:rerun-if-env-changed=NX_MODULES_DIR");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("ios") {
         return;
@@ -72,7 +73,7 @@ fn build_launcher() {
     let swiftc = xcrun(&["--sdk", "iphoneos", "-f", "swiftc"]);
     let status = std::process::Command::new(&swiftc)
         .args(["-parse-as-library", "-emit-library", "-static", "-O", "-module-name", "Mush8Launcher"])
-        .args(["-target", "arm64-apple-ios26.0", "-sdk", &sdk])
+        .args(["-target", "arm64-apple-ios16.1", "-sdk", &sdk])
         .arg("../../ios/Launcher.swift")
         .arg("-o")
         .arg(format!("{out}/libmush8launcher.a"))

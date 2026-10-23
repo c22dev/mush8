@@ -151,7 +151,7 @@ let gameFiles = [
     GameFile(id: "Update", name: "upd4-0-1.nsp"),
     GameFile(id: "Booster Course Pass", name: "dlc.nsp", optional: true),
     GameFile(id: "Console Keys", name: "prod.keys"),
-    GameFile(id: "Firmware", name: "Firmware"),
+    GameFile(id: "Firmware", name: "Firmware", optional: true),
 ]
 
 final class Files: ObservableObject {
@@ -346,9 +346,9 @@ struct LauncherView: View {
             files.scan()
             if usesLocalNetwork { network.request() }
         }
-        .onChange(of: s.network) { if usesLocalNetwork { network.request() } }
-        .onChange(of: s.phonePads) { if usesLocalNetwork { network.request() } }
-        .onChange(of: phase) { _, p in if p == .active { files.scan() } }
+        .onChange(of: s.network) { _ in if usesLocalNetwork { network.request() } }
+        .onChange(of: s.phonePads) { _ in if usesLocalNetwork { network.request() } }
+        .onChange(of: phase) { p in if p == .active { files.scan() } }
         .task {
             while !Task.isCancelled {
                 memory = os_proc_available_memory()
