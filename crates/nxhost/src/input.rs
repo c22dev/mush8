@@ -41,6 +41,26 @@ fn scripted(player: usize) -> u64 {
 
 pub const MAX_PLAYERS: usize = 8;
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PadDriver {
+    Apple,
+    Sdl,
+}
+
+impl PadDriver {
+    pub fn parse(v: Option<&str>) -> PadDriver {
+        if v == Some("sdl") { PadDriver::Sdl } else { PadDriver::Apple }
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn pad_driver() -> PadDriver {
+    static DRIVER: std::sync::LazyLock<PadDriver> = std::sync::LazyLock::new(|| {
+        if cfg!(target_os = "macos") { PadDriver::parse(std::env::var("NX_PAD_DRIVER").ok().as_deref()) } else { PadDriver::Apple }
+    });
+    *DRIVER
+}
+
 #[derive(Clone, Copy)]
 pub struct Motion {
     pub accel: [f32; 3],
@@ -421,5 +441,19 @@ impl Acc {
             }
         }
         p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pad_driver_parse() {
+        assert_eq!(PadDriver::parse(None), PadDriver::Apple);
+        assert_eq!(PadDriver::parse(Some("apple")), PadDriver::Apple);
+        assert_eq!(PadDriver::parse(Some("sdl")), PadDriver::Sdl);
+        assert_eq!(PadDriver::parse(Some("SDL")), PadDriver::Apple);
+        assert_eq!(PadDriver::parse(Some("")), PadDriver::Apple);
     }
 }
