@@ -53,12 +53,12 @@ if [ "$SHADERS" = 1 ] || [ ! -f "$CACHE/index.tsv" ] || [ "$(cat "$CACHE/pipelin
   echo "$STAMP" > "$CACHE/pipelines.stamp"
 fi
 
-NX_MODULES_DIR="$PATCHED" IPHONEOS_DEPLOYMENT_TARGET=26.0 \
+IPHONEOS_DEPLOYMENT_TARGET=16.1 \
   cargo "+$TOOLCHAIN" build --release -p nxhost --target aarch64-apple-ios --target-dir target/ios
 
 rm -rf "$RES"
 mkdir -p "$RES/modules" "$RES/shaders"
-cp "$PATCHED"/*.layout work/v-upd/exefs/main.npdm "$RES/modules/"
+cp "$PATCHED"/*.bin "$PATCHED"/*.layout work/v-upd/exefs/main.npdm "$RES/modules/"
 cp -c "$CACHE"/*.metallib "$CACHE"/index.tsv "$CACHE"/guest.tsv "$RES/shaders/"
 cp "$LIST" "$RES/shaders/pipelines.tsv"
 

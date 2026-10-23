@@ -4,7 +4,7 @@
 name: Mush8
 options:
   deploymentTarget:
-    iOS: "26.0"
+    iOS: "16.1"
 targets:
   Mush8:
     type: application

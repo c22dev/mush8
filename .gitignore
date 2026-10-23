@@ -1,0 +1,14 @@
+.DS_Store
+
+# Private Switch dumps and keys must never be committed.
+*.nsp
+*.xci
+*.nca
+prod.keys
+Firmware/
+
+# Generated build and extraction output.
+build/
+target/
+work/
+ios/Mush8.xcodeproj/

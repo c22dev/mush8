@@ -15,6 +15,7 @@ mod loader;
 mod mem;
 mod movie;
 mod remote;
+mod resource_compat;
 mod services;
 mod shm;
 mod stubs;
@@ -130,6 +131,9 @@ fn main() {
     let mut env: Vec<(String, String)> = vec![
         ("NX_SHADER_CACHE".into(), bundle.join("shaders").display().to_string()),
         ("NX_PIPELINE_LIST".into(), bundle.join("shaders/pipelines.tsv").display().to_string()),
+        // iOS 16 reports BC texture support on Apple Silicon but rejects BC
+        // pixel formats at texture creation. Decode them before uploading.
+        ("NX_SOFT_BC".into(), "1".into()),
     ];
     for line in std::fs::read_to_string("env.txt").unwrap_or_default().lines() {
         if let Some((k, v)) = line.trim().split_once('=').filter(|(k, _)| !k.is_empty() && !k.starts_with('#')) {
@@ -143,6 +147,11 @@ fn main() {
     let args = Args::parse_from(["nxhost", "--patched", &bundle.join("modules").display().to_string(), "--npdm", &bundle.join("modules/main.npdm").display().to_string()]);
     gfx::run_app(move || {
         apply_launcher_settings();
+        if !std::path::Path::new("Firmware").is_dir() && std::env::var_os("NX_LANGUAGE").is_none() {
+            // The iOS system-font fallback is Latin; keep the game usable until
+            // the user's dumped Switch firmware (including CJK fonts) is added.
+            unsafe { std::env::set_var("NX_LANGUAGE", "en-US") };
+        }
         let missing: Vec<&str> = ["prod.keys", "base.nsp", "upd4-0-1.nsp"].into_iter().filter(|f| !std::path::Path::new(f).exists()).collect();
         anyhow::ensure!(
             missing.is_empty(),
@@ -257,6 +266,7 @@ fn start(args: Args) -> Result<()> {
     eprintln!("[host] guest address space at {:#x}..{:#x}", a.base, a.base + a.layout.total());
 
     let mods = loader::load(&dir, &["main", "subsdk0", "sdk"], &hle::table())?;
+    resource_compat::init(&mods);
     let _ = diag::MODULES.set(
         mods.iter()
             .map(|m| {

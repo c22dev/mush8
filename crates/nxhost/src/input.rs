@@ -146,29 +146,31 @@ pub struct Pads {
     extra: usize,
     fill: usize,
     touch_init: bool,
+    keyboard: bool,
     phone: Phone,
 }
 
 impl Pads {
     pub fn new() -> Self {
         let extra = std::env::var("NX_EXTRA_PADS").ok().and_then(|v| v.parse().ok()).unwrap_or(0usize).min(MAX_PLAYERS - 1);
-        Self { slots: Default::default(), phones: Default::default(), extra, fill: 0, touch_init: false, phone: Default::default() }
+        Self { slots: Default::default(), phones: Default::default(), extra, fill: 0, touch_init: false, keyboard: false, phone: Default::default() }
     }
 
     pub fn poll(&mut self) -> [Option<PadState>; MAX_PLAYERS] {
         let had_pad = self.slots[0].is_some();
-        let out = self.poll_pads();
-        if self.slots[0].is_some() != had_pad || !self.touch_init {
+        let keyboard = unsafe { GCKeyboard::coalescedKeyboard().and_then(|k| k.keyboardInput()).is_some() };
+        let input_changed = std::mem::replace(&mut self.keyboard, keyboard) != keyboard;
+        let out = self.poll_pads(input_changed);
+        if self.slots[0].is_some() != had_pad || input_changed || !self.touch_init {
             self.touch_init = true;
-            crate::gfx::set_touch_controls(self.slots[0].is_none());
+            crate::gfx::set_touch_controls(self.slots[0].is_none() && !self.keyboard);
         }
         out
     }
 
-    fn poll_pads(&mut self) -> [Option<PadState>; MAX_PLAYERS] {
+    fn poll_pads(&mut self, mut changed: bool) -> [Option<PadState>; MAX_PLAYERS] {
         objc2::rc::autoreleasepool(|_| unsafe {
             let connected: Vec<_> = GCController::controllers().iter().filter(|c| c.extendedGamepad().is_some()).collect();
-            let mut changed = false;
             for s in self.slots.iter_mut() {
                 if s.as_ref().is_some_and(|c| !connected.iter().any(|n| std::ptr::eq(&**n, &**c))) {
                     *s = None;
@@ -234,7 +236,7 @@ impl Pads {
                 }
                 if i == 0 {
                     acc.keyboard();
-                    if slot.is_none() {
+                    if slot.is_none() && !self.keyboard {
                         acc.touch();
                     }
                 }
@@ -264,6 +266,7 @@ impl Pads {
                 let name = match slot {
                     Some(c) => Some(c.vendorName().map_or("Controller".into(), |n| n.to_string())),
                     None if remote.is_some() => Some("iPhone".into()),
+                    None if i == 0 && self.keyboard => Some("Keyboard".into()),
                     None if i == 0 && cfg!(target_os = "ios") => Some("Touch controls".into()),
                     None if i == 0 => Some("Keyboard".into()),
                     None if virtual_pad => Some("Virtual controller".into()),
@@ -376,8 +379,12 @@ impl Acc {
             let Some(k) = GCKeyboard::coalescedKeyboard().and_then(|k| k.keyboardInput()) else { return };
             let down = |code: GCKeyCode| k.buttonForKeyCode(code).is_some_and(|b| b.isPressed());
             let keys = [
+                // Keyboard driving layout: W/S are the accelerator and
+                // brake/reverse, while A/D steer on the left stick.
+                (GCKeyCodeKeyW, A),
                 (GCKeyCodeKeyX, A),
                 (GCKeyCodeReturnOrEnter, A),
+                (GCKeyCodeKeyS, B),
                 (GCKeyCodeKeyZ, B),
                 (GCKeyCodeDeleteOrBackspace, B),
                 (GCKeyCodeKeyC, X),
@@ -401,7 +408,6 @@ impl Acc {
             }
             let axis = |neg: GCKeyCode, pos: GCKeyCode| down(pos) as i32 as f32 - down(neg) as i32 as f32;
             self.lx += axis(GCKeyCodeKeyA, GCKeyCodeKeyD);
-            self.ly += axis(GCKeyCodeKeyS, GCKeyCodeKeyW);
             self.rx += axis(GCKeyCodeKeyJ, GCKeyCodeKeyL);
             self.ry += axis(GCKeyCodeKeyK, GCKeyCodeKeyI);
         }
