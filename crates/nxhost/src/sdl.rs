@@ -38,6 +38,14 @@ pub fn connected() -> Vec<SDL_JoystickID> {
     }
 }
 
+// SDL checks that the gamepad object is still valid, so a pad closed by the input thread just returns false.
+pub fn rumble(id: SDL_JoystickID, low: u16, high: u16, ms: u32) -> bool {
+    unsafe {
+        let gamepad = SDL_GetGamepadFromID(id);
+        !gamepad.is_null() && SDL_RumbleGamepad(gamepad, low, high, ms)
+    }
+}
+
 pub struct Reading {
     pub buttons: u64,
     pub sticks: [f32; 4],

@@ -34,9 +34,27 @@ impl Value {
 struct Ctl(Retained<GCController>);
 unsafe impl Send for Ctl {}
 
+enum Target {
+    Apple(Ctl),
+    #[cfg(target_os = "macos")]
+    Sdl(sdl3_sys::everything::SDL_JoystickID),
+}
+
+const RUMBLE_MS: u32 = 1000;
+const RESEND: Duration = Duration::from_millis(500);
+
+fn sdl_strength(v: [Value; 2]) -> (u16, u16) {
+    let s = |v: Value| (v.feel().0.clamp(0.0, 1.0) * 65535.0).round() as u16;
+    (s(v[0]), s(v[1]))
+}
+
+fn resend_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= RESEND)
+}
+
 struct Shared {
     values: [[Value; 2]; MAX_PLAYERS],
-    controllers: [Option<Ctl>; MAX_PLAYERS],
+    controllers: [Option<Target>; MAX_PLAYERS],
     dirty: bool,
 }
 
@@ -70,8 +88,10 @@ pub fn last(player: usize, side: usize) -> Value {
 pub fn set_controllers(slots: &[Option<crate::input::Ctl>; MAX_PLAYERS]) {
     let mut s = SHARED.lock().unwrap();
     s.controllers = std::array::from_fn(|i| match &slots[i] {
-        Some(crate::input::Ctl::Apple(c)) => Some(Ctl(c.clone())),
-        _ => None,
+        Some(crate::input::Ctl::Apple(c)) => Some(Target::Apple(Ctl(c.clone()))),
+        #[cfg(target_os = "macos")]
+        Some(crate::input::Ctl::Sdl(p)) => Some(Target::Sdl(p.id())),
+        None => None,
     });
     s.dirty = true;
     WAKE.notify_one();
@@ -88,6 +108,8 @@ fn start() {
 enum Source {
     None,
     Controller(usize),
+    #[cfg(target_os = "macos")]
+    Sdl(u32),
     #[cfg(target_os = "ios")]
     Device,
 }
@@ -175,36 +197,63 @@ struct Out {
     source: Source,
     engine: Option<Engine>,
     retry: Option<Instant>,
+    sdl: Option<((u16, u16), Instant)>,
 }
 
 fn run() {
-    let mut outs: [Out; MAX_PLAYERS] = std::array::from_fn(|_| Out { source: Source::None, engine: None, retry: None });
+    let mut outs: [Out; MAX_PLAYERS] = std::array::from_fn(|_| Out { source: Source::None, engine: None, retry: None, sdl: None });
     loop {
-        let (values, controllers) = {
+        let (values, controllers, sdl_ids) = {
             let mut s = SHARED.lock().unwrap();
             while !s.dirty {
-                let active = outs.iter().any(|o| o.engine.as_ref().is_some_and(|e| e.started.is_some()));
+                let active = outs.iter().any(|o| o.engine.as_ref().is_some_and(|e| e.started.is_some()) || o.sdl.is_some());
                 s = WAKE.wait_timeout(s, Duration::from_millis(if active { 500 } else { 5000 })).unwrap().0;
                 if active {
                     break;
                 }
             }
             s.dirty = false;
-            let ctls: [Option<Retained<GCController>>; MAX_PLAYERS] = std::array::from_fn(|i| s.controllers[i].as_ref().map(|c| c.0.clone()));
-            (s.values, ctls)
+            let ctls: [Option<Retained<GCController>>; MAX_PLAYERS] = std::array::from_fn(|i| match &s.controllers[i] {
+                Some(Target::Apple(c)) => Some(c.0.clone()),
+                _ => None,
+            });
+            let sdl_ids: [Option<u32>; MAX_PLAYERS] = std::array::from_fn(|i| match &s.controllers[i] {
+                #[cfg(target_os = "macos")]
+                Some(Target::Sdl(id)) => Some(id.0),
+                _ => None,
+            });
+            (s.values, ctls, sdl_ids)
         };
         objc2::rc::autoreleasepool(|_| {
             for (i, out) in outs.iter_mut().enumerate() {
-                let source = match &controllers[i] {
-                    Some(c) => Source::Controller(Retained::as_ptr(c) as usize),
+                let source = match (&controllers[i], sdl_ids[i]) {
+                    #[cfg(target_os = "macos")]
+                    (_, Some(id)) => Source::Sdl(id),
+                    (Some(c), _) => Source::Controller(Retained::as_ptr(c) as usize),
                     #[cfg(target_os = "ios")]
-                    None if i == 0 => Source::Device,
-                    None => Source::None,
+                    (None, _) if i == 0 => Source::Device,
+                    _ => Source::None,
                 };
                 if source != out.source {
+                    #[cfg(target_os = "macos")]
+                    if let (Source::Sdl(old), Some(_)) = (out.source, out.sdl.take()) {
+                        crate::sdl::rumble(sdl3_sys::everything::SDL_JoystickID(old), 0, 0, 0);
+                    }
                     out.source = source;
                     out.engine = None;
                     out.retry = None;
+                }
+                #[cfg(target_os = "macos")]
+                if let Source::Sdl(id) = out.source {
+                    let strength = sdl_strength(values[i]);
+                    let sent = out.sdl.map_or((0, 0), |(v, _)| v);
+                    let now = Instant::now();
+                    if strength != sent || (strength != (0, 0) && resend_due(out.sdl.map(|(_, t)| t), now)) {
+                        let ms = if strength == (0, 0) { 0 } else { RUMBLE_MS };
+                        let ok = crate::sdl::rumble(sdl3_sys::everything::SDL_JoystickID(id), strength.0, strength.1, ms);
+                        out.sdl = (ok && strength != (0, 0)).then_some((strength, now));
+                    }
+                    continue;
                 }
                 let (l, r) = (values[i][0].feel(), values[i][1].feel());
                 let feel = if l.0 >= r.0 { l } else { r };
@@ -226,5 +275,28 @@ fn run() {
             }
         });
         std::thread::sleep(Duration::from_millis(8));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdl_strength_sides() {
+        assert_eq!(sdl_strength([Value::IDLE, Value::IDLE]), (0, 0));
+        let full = Value { amp_low: 1.0, ..Value::IDLE };
+        assert_eq!(sdl_strength([full, Value::IDLE]), (65535, 0));
+        assert_eq!(sdl_strength([Value::IDLE, full]), (0, 65535));
+        let nan = Value { amp_low: f32::NAN, ..Value::IDLE };
+        assert_eq!(sdl_strength([nan, nan]), (0, 0));
+    }
+
+    #[test]
+    fn resend_due() {
+        let t = Instant::now();
+        assert!(super::resend_due(None, t));
+        assert!(!super::resend_due(Some(t), t + Duration::from_millis(100)));
+        assert!(super::resend_due(Some(t), t + RESEND));
     }
 }
