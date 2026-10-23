@@ -40,14 +40,18 @@ enum Target {
     Sdl(sdl3_sys::everything::SDL_JoystickID),
 }
 
+#[cfg(target_os = "macos")]
 const RUMBLE_MS: u32 = 1000;
+#[cfg(target_os = "macos")]
 const RESEND: Duration = Duration::from_millis(500);
 
+#[cfg(target_os = "macos")]
 fn sdl_strength(v: [Value; 2]) -> (u16, u16) {
     let s = |v: Value| (v.feel().0.clamp(0.0, 1.0) * 65535.0).round() as u16;
     (s(v[0]), s(v[1]))
 }
 
+#[cfg(target_os = "macos")]
 fn resend_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= RESEND)
 }
