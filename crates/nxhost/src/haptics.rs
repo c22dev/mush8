@@ -67,9 +67,12 @@ pub fn last(player: usize, side: usize) -> Value {
     SHARED.lock().unwrap().values[player][side]
 }
 
-pub fn set_controllers(slots: &[Option<Retained<GCController>>; MAX_PLAYERS]) {
+pub fn set_controllers(slots: &[Option<crate::input::Ctl>; MAX_PLAYERS]) {
     let mut s = SHARED.lock().unwrap();
-    s.controllers = std::array::from_fn(|i| slots[i].clone().map(Ctl));
+    s.controllers = std::array::from_fn(|i| match &slots[i] {
+        Some(crate::input::Ctl::Apple(c)) => Some(Ctl(c.clone())),
+        _ => None,
+    });
     s.dirty = true;
     WAKE.notify_one();
 }

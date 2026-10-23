@@ -616,6 +616,7 @@ dependencies = [
  "objc2-quartz-core",
  "objc2-ui-kit",
  "png",
+ "sdl3-sys",
 ]
 
 [[package]]
@@ -1117,10 +1118,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rpkg-config"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a2d2f3481209a6b42eec2fbb49063fb4e8d35b57023401495d4fe0f85c817f0"
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b1e7f9a428571be2dc5bc0505c13fb6bf936822b894ec87abf8a08a4e51742d"
+
+[[package]]
+name = "sdl3-src"
+version = "3.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "400d0fb006a4485fde477cfc56a250c99d7bfb183fefd145c15fe7607db7fc49"
+
+[[package]]
+name = "sdl3-sys"
+version = "0.7.2+SDL-3.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b6a7f3cad40c5b318b3539bb4624389f4a03504cd5f4c65030787b962505ac"
+dependencies = [
+ "cc",
+ "cmake",
+ "pkg-config",
+ "rpkg-config",
+ "sdl3-src",
+ "vcpkg",
+]
 
 [[package]]
 name = "serde"
@@ -1292,6 +1319,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "vcpkg"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "windows-link"

@@ -16,6 +16,8 @@ mod mem;
 mod movie;
 mod remote;
 mod services;
+#[cfg(target_os = "macos")]
+mod sdl;
 mod shm;
 mod stubs;
 mod nvn;
