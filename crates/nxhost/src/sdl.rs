@@ -10,6 +10,8 @@ const TRIGGER_PRESSED: i16 = 16384;
 pub fn init() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| unsafe {
+        // SDL would catch SIGINT and SIGTERM and only queue a quit event, which we never pump
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, c"1".as_ptr());
         if !SDL_Init(SDL_INIT_GAMEPAD) {
             eprintln!("[input] SDL init failed: {}", error());
             return false;
@@ -170,6 +172,16 @@ pub fn motion_from(accel: [f32; 3], gyro: [f32; 3]) -> Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_keeps_default_quit_signals() {
+        assert!(init());
+        for sig in [libc::SIGINT, libc::SIGTERM] {
+            let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+            unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) };
+            assert_eq!(old.sa_sigaction, libc::SIG_DFL, "signal {sig} handler was replaced");
+        }
+    }
 
     #[test]
     fn face_buttons_match_switch_positions() {
