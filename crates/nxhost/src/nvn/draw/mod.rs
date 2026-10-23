@@ -50,6 +50,30 @@ struct Engine {
     sampled: HashMap<textures::TexKey, Shared<gfx::Texture>>,
     touched: Vec<(textures::TexKey, Shared<gfx::Texture>)>,
     clears: Vec<PendingClear>,
+    incomplete: bool,
+    held: Held,
+}
+
+// A draw is skipped while its shader or pipeline compiles in the background. A frame missing draws can show what a
+// layer was meant to hide (the race behind the loading screen flashing through for a frame), so the last complete
+// image stays on screen instead, for at most MAX frames in a row.
+#[derive(Default)]
+struct Held {
+    frames: u32,
+}
+
+impl Held {
+    const MAX: u32 = 30;
+
+    fn present(&mut self, incomplete: bool) -> bool {
+        if incomplete && self.frames < Self::MAX {
+            self.frames += 1;
+            false
+        } else {
+            self.frames = 0;
+            true
+        }
+    }
 }
 
 struct PendingClear {
@@ -271,7 +295,9 @@ impl Replay<'_> {
                     let _ = r;
                 }
                 Cmd::Draw(d) => {
-                    let _ = self.draw(d);
+                    if self.draw(d).is_err_and(|e| e.ends_with("compiling")) {
+                        self.e.incomplete = true;
+                    }
                 }
             }
         }
@@ -656,14 +682,17 @@ pub fn present(texture: u64) {
     objc2::rc::autoreleasepool(|_| {
         let b = super::objects::texture(texture).map(|t| t.builder);
         let Some(b) = b else { return };
-        let t = {
+        let (t, show) = {
             let mut e = ENGINE.lock().unwrap();
             e.forget_dead();
-            e.textures.get(&b, true)
+            let incomplete = std::mem::take(&mut e.incomplete);
+            (e.textures.get(&b, true), e.held.present(incomplete))
         };
         if let Some((_, t)) = t {
-            dump_at(&t);
-            crate::kernel::blocking(|| gfx::present(&t.0, !UPPER_LEFT.load(Relaxed)));
+            if show {
+                dump_at(&t);
+            }
+            crate::kernel::blocking(|| gfx::present(show.then_some(&*t.0), !UPPER_LEFT.load(Relaxed)));
         }
     });
 }
@@ -808,5 +837,23 @@ fn collect_updates(cmds: &[Cmd], depth: usize, out: &mut BTreeMap<u64, u64>) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Held;
+
+    #[test]
+    fn incomplete_frames_are_held_back_for_a_while() {
+        let mut h = Held::default();
+        assert!(h.present(false));
+        for _ in 0..Held::MAX {
+            assert!(!h.present(true));
+        }
+        assert!(h.present(true), "a frame still missing draws is shown after {} held frames", Held::MAX);
+        assert!(!h.present(true));
+        assert!(h.present(false));
+        assert!(!h.present(true));
     }
 }
