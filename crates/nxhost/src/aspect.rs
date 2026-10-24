@@ -117,7 +117,7 @@ struct Rule {
 
 const CONTENT_FITTED: &[&str] = &["cm_LoadScreen_00", "mn_L_CharaWin_00"];
 
-const STRETCHED_ROOTS: &[&str] = &["rc_RaceView_1P_00", "rc_Viewer_00", "cm_Fade_Pause_00", "cm_Page_Fader", "cm_Page_FaderPause", "mn_L_BlurBG_00"];
+const STRETCHED_ROOTS: &[&str] = &["rc_RaceView_1P_00", "rc_Viewer_00", "cm_Fade_Pause_00", "cm_Page_Fader", "cm_Page_FaderPause", "mn_L_BlurBG_00", "mn_Page_Present_Parts", "mn_Page_Present_Chara", "rc_Page_RaceReplay_Award"];
 
 const RULES: &[Rule] = &[
     Rule { layout: "rc_RaceView_1P_00", panes: &["N_Pause_00", "N_Pause_01"], op: Op::Fit },
@@ -136,6 +136,23 @@ const RULES: &[Rule] = &[
     Rule { layout: "mn_GrprClassSlct_00", panes: &["N_Capture_00"], op: Op::Zoom },
     Rule { layout: "bt_TitleLoading_00", panes: &["N_CheckBG_00"], op: Op::Cover },
     Rule { layout: "cm_LoadWin_00", panes: &["N_All_00"], op: Op::Cover },
+    // the game puts each unlock gift on its slot's on-screen position, which is already narrowed: keep the page
+    // root as is (STRETCHED_ROOTS) and narrow only the gifts
+    Rule {
+        layout: "mn_Page_Present_Parts",
+        panes: &[
+            "mn_L_KartParts_Gift_00_0",
+            "mn_L_KartParts_Gift_00_1",
+            "mn_L_KartParts_Gift_00_2",
+            "mn_L_KartParts_Gift_00_3",
+            "mn_L_KartParts_Gift_00_4",
+            "mn_L_KartParts_Gift_00_5",
+            "mn_L_KartParts_Gift_00_6",
+            "mn_L_KartParts_Gift_00_7",
+        ],
+        op: Op::Fit,
+    },
+    Rule { layout: "mn_Page_Present_Chara", panes: &["mn_L_CharaSlct_Gift_00_0"], op: Op::Fit },
 ];
 
 const NOT_BACKDROPS: &[&str] = &["Logo", "Capture", "Movie", "View"];
@@ -504,5 +521,43 @@ mod tests {
                 ("N_Loop_00".into(), Edit::Translate(Axis::X, 1.0 / s)),
             ]
         );
+    }
+
+    // The game moves each gift onto the slot it unwraps, using the slot's position on screen. That position is
+    // already narrowed, so the page must not narrow it again: only the gift itself is narrowed, around its centre.
+    #[test]
+    fn unlock_gifts_follow_their_slot() {
+        let ratio = 2.17;
+        let s = (ratio / NATIVE) as f32;
+        let plan = Plan::new(Some(Target { ratio, hud_ratio: ratio }), 1.0).unwrap();
+        for (page, gifts) in [
+            ("mn_Page_Present_Parts", (0..8).map(|i| format!("mn_L_KartParts_Gift_00_{i}")).collect::<Vec<_>>()),
+            ("mn_Page_Present_Chara", vec!["mn_L_CharaSlct_Gift_00_0".to_string()]),
+        ] {
+            let mut panes = vec![(b"pan1", "RootPane", [0.0, 0.0], [1280.0, 720.0]), (b"prt1", "mn_GiftBG_00", [0.0, 0.0], [1280.0, 720.0])];
+            panes.extend(gifts.iter().map(|g| (b"prt1", g.as_str(), [0.0, 0.0], [253.7, 171.0])));
+            let mut d = layout(&panes);
+            let l = Layout::parse(&mut d).unwrap();
+            let edits = plan.edits(page, &l);
+            assert!(!edits.iter().any(|(p, _)| p == "RootPane"), "{page}: {edits:?}");
+            for g in &gifts {
+                assert_eq!(edits.iter().filter(|(p, _)| p == g).collect::<Vec<_>>(), [&(g.clone(), Edit::Scale(Axis::X, 1.0 / s))], "{page}");
+            }
+        }
+    }
+
+    // The end-of-cup highlight reel shows rc_HighlightAward_00 inside this page. That part already keeps its blurred
+    // grey cover and its scrolling flag bands full width and narrows only its content, so the page must not narrow
+    // it again, or the cover and bands shrink to 16:9 and the content is narrowed twice.
+    #[test]
+    fn cup_highlight_reel_page_is_not_narrowed() {
+        let mut d = layout(&[
+            (b"pan1", "RootPane", [0.0, 0.0], [1280.0, 720.0]),
+            (b"prt1", "rc_HighlightAward_00", [0.0, 0.0], [1442.1, 2433.4]),
+            (b"prt1", "rc_Viewer_00", [0.0, 0.0], [1280.0, 720.0]),
+        ]);
+        let plan = Plan::new(Some(Target { ratio: 2.17, hud_ratio: 2.17 }), 1.0).unwrap();
+        let l = Layout::parse(&mut d).unwrap();
+        assert_eq!(plan.edits("rc_Page_RaceReplay_Award", &l), []);
     }
 }

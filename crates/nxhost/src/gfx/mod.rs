@@ -424,7 +424,8 @@ fn present_params(tex: &Texture, flip: bool) -> (PresentParams, f64) {
     (p, (w / h) as f64)
 }
 
-pub fn present(tex: &Texture, flip: bool) {
+// None keeps the image on screen as it is, while still counting and pacing the frame
+pub fn present(tex: Option<&Texture>, flip: bool) {
     #[cfg(target_os = "ios")]
     if !ios::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -442,6 +443,7 @@ pub fn present(tex: &Texture, flip: bool) {
     } else if interval > 0 {
         pace(FRAME * interval);
     }
+    let Some(tex) = tex else { return };
     let Some(layer) = LAYER.get() else { return };
     let bounds = layer.0.bounds().size;
     let scale = layer.0.contentsScale();

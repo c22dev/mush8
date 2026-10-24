@@ -50,6 +50,27 @@ struct Engine {
     sampled: HashMap<textures::TexKey, Shared<gfx::Texture>>,
     touched: Vec<(textures::TexKey, Shared<gfx::Texture>)>,
     clears: Vec<PendingClear>,
+    draws: u32,
+    skipped: u32,
+    held: Held,
+}
+
+// A draw is skipped while its shader or pipeline compiles in the background. A frame missing draws can show what a
+// layer was meant to hide: the first race frame behind the loading screen loses about a fifth of its draws and the
+// race flashes through, and a white menu fade that loses 4 of its 143 draws turns grey. A frame missing at least 2% of
+// its draws is held back and the last complete image stays on screen. Race frames miss at most about 1% and are
+// shown, and a frame is never held back after a held one, so holding costs at most one repeated frame (16.7 ms at
+// 60 fps).
+#[derive(Default)]
+struct Held {
+    last: bool,
+}
+
+impl Held {
+    fn present(&mut self, skipped: u32, draws: u32) -> bool {
+        self.last = !self.last && skipped * 50 >= draws.max(1);
+        !self.last
+    }
 }
 
 struct PendingClear {
@@ -271,7 +292,10 @@ impl Replay<'_> {
                     let _ = r;
                 }
                 Cmd::Draw(d) => {
-                    let _ = self.draw(d);
+                    self.e.draws += 1;
+                    if self.draw(d).is_err_and(|e| e.ends_with("compiling")) {
+                        self.e.skipped += 1;
+                    }
                 }
             }
         }
@@ -656,14 +680,17 @@ pub fn present(texture: u64) {
     objc2::rc::autoreleasepool(|_| {
         let b = super::objects::texture(texture).map(|t| t.builder);
         let Some(b) = b else { return };
-        let t = {
+        let (t, show) = {
             let mut e = ENGINE.lock().unwrap();
             e.forget_dead();
-            e.textures.get(&b, true)
+            let (skipped, draws) = (std::mem::take(&mut e.skipped), std::mem::take(&mut e.draws));
+            (e.textures.get(&b, true), e.held.present(skipped, draws))
         };
         if let Some((_, t)) = t {
-            dump_at(&t);
-            crate::kernel::blocking(|| gfx::present(&t.0, !UPPER_LEFT.load(Relaxed)));
+            if show {
+                dump_at(&t);
+            }
+            crate::kernel::blocking(|| gfx::present(show.then_some(&*t.0), !UPPER_LEFT.load(Relaxed)));
         }
     });
 }
@@ -808,5 +835,28 @@ fn collect_updates(cmds: &[Cmd], depth: usize, out: &mut BTreeMap<u64, u64>) {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Held;
+
+    #[test]
+    fn only_frames_missing_many_draws_are_held_back() {
+        let mut h = Held::default();
+        assert!(h.present(0, 3200));
+        assert!(!h.present(700, 3200), "the race behind the loading screen, missing a fifth of its draws, is held back");
+        assert!(h.present(30, 2500), "a frame missing about 1% of its draws is shown");
+        assert!(h.present(13, 1200), "a race frame missing about 1% of its draws is shown");
+        assert!(!h.present(4, 143), "a menu fade missing 4 of 143 draws turns grey and is held back");
+    }
+
+    #[test]
+    fn never_two_frames_in_a_row_are_held_back() {
+        let mut h = Held::default();
+        assert!(!h.present(700, 3200));
+        assert!(h.present(700, 3200), "the second frame in a row is shown, so a hold costs at most one repeated frame");
+        assert!(!h.present(700, 3200));
     }
 }
