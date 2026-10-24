@@ -117,7 +117,7 @@ struct Rule {
 
 const CONTENT_FITTED: &[&str] = &["cm_LoadScreen_00", "mn_L_CharaWin_00"];
 
-const STRETCHED_ROOTS: &[&str] = &["rc_RaceView_1P_00", "rc_Viewer_00", "cm_Fade_Pause_00", "cm_Page_Fader", "cm_Page_FaderPause", "mn_L_BlurBG_00", "mn_Page_Present_Parts", "mn_Page_Present_Chara"];
+const STRETCHED_ROOTS: &[&str] = &["rc_RaceView_1P_00", "rc_Viewer_00", "cm_Fade_Pause_00", "cm_Page_Fader", "cm_Page_FaderPause", "mn_L_BlurBG_00", "mn_Page_Present_Parts", "mn_Page_Present_Chara", "rc_Page_RaceReplay_Award"];
 
 const RULES: &[Rule] = &[
     Rule { layout: "rc_RaceView_1P_00", panes: &["N_Pause_00", "N_Pause_01"], op: Op::Fit },
@@ -544,5 +544,20 @@ mod tests {
                 assert_eq!(edits.iter().filter(|(p, _)| p == g).collect::<Vec<_>>(), [&(g.clone(), Edit::Scale(Axis::X, 1.0 / s))], "{page}");
             }
         }
+    }
+
+    // The end-of-cup highlight reel shows rc_HighlightAward_00 inside this page. That part already keeps its blurred
+    // grey cover and its scrolling flag bands full width and narrows only its content, so the page must not narrow
+    // it again, or the cover and bands shrink to 16:9 and the content is narrowed twice.
+    #[test]
+    fn cup_highlight_reel_page_is_not_narrowed() {
+        let mut d = layout(&[
+            (b"pan1", "RootPane", [0.0, 0.0], [1280.0, 720.0]),
+            (b"prt1", "rc_HighlightAward_00", [0.0, 0.0], [1442.1, 2433.4]),
+            (b"prt1", "rc_Viewer_00", [0.0, 0.0], [1280.0, 720.0]),
+        ]);
+        let plan = Plan::new(Some(Target { ratio: 2.17, hud_ratio: 2.17 }), 1.0).unwrap();
+        let l = Layout::parse(&mut d).unwrap();
+        assert_eq!(plan.edits("rc_Page_RaceReplay_Award", &l), []);
     }
 }
