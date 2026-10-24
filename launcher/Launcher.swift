@@ -377,6 +377,14 @@ struct LauncherView: View {
         Text(text).font(.caption).foregroundStyle(.secondary)
     }
 
+    // an option's name with its explanation under it, in the option's own row
+    func labeled(_ title: String, _ detail: String?) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+            if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+        }
+    }
+
     var settingsSection: some View {
         Section("Settings") {
             Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1 })) {
@@ -427,11 +435,12 @@ struct LauncherView: View {
             Toggle("Prewarm pipelines", isOn: $s.prewarm)
             Toggle("Background shader compiling", isOn: $s.backgroundCompile)
             caption("Builds the game's graphics pipelines in the background at startup")
-            Picker("Gamepad driver", selection: $s.padDriver) {
+            Picker(selection: $s.padDriver) {
                 Text("Apple").tag("apple")
                 Text("SDL").tag("sdl")
+            } label: {
+                labeled("Gamepad driver", "SDL supports more controllers, and rumble on more of them. Apple follows the button remapping in System Settings")
             }
-            caption("SDL supports more controllers, and rumble on more of them. Apple follows the button remapping in System Settings")
             Toggle("Vibration", isOn: $s.rumble)
             Toggle("Motion controls", isOn: $s.motion)
             Toggle("Spatial audio", isOn: $s.spatial)

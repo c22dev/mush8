@@ -1,7 +1,11 @@
 // Mush8 - motion.rs
 // Constantin Clerc (c22dev) - 0.1
-// Six-axis fusion ported from the yuzu Emulator Project's MotionInput (GPL-2.0-or-later,
-// citron src/hid_core/frontend/motion_input.cpp): a Mahony filter that corrects the gyro with gravity.
+// Fusion is a Rust port of MotionInput from the yuzu Emulator Project
+// (src/hid_core/frontend/motion_input.cpp, as kept in citron-neo/emulator):
+//   SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
+//   SPDX-License-Identifier: GPL-2.0-or-later
+// It is used here under GPL-3.0, Mush8's license. The port leaves out ResetOrientation and calibration mode.
+// It is a Mahony filter that corrects the gyro with gravity.
 // Units are the game's: acceleration in g, gyro in turns per second, time in seconds.
 
 const KP: f32 = 0.3;
