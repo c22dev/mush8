@@ -1,5 +1,3 @@
-// Mush8 - motion.rs
-// Constantin Clerc (c22dev) - 0.1
 // Fusion is a Rust port of MotionInput from the yuzu Emulator Project
 // (src/hid_core/frontend/motion_input.cpp, as kept in citron-neo/emulator):
 //   SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project

@@ -1,5 +1,3 @@
-// Mush8 - sdl.rs
-// Constantin Clerc (c22dev) - 0.1
 // SDL is set up and polled only on the HID service thread that calls Pads::poll.
 // SDL_RumbleGamepad is the one call from another thread (haptics), and SDL locks its joystick state for it.
 use crate::input::*;
