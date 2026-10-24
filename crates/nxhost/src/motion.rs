@@ -128,6 +128,105 @@ impl Fusion {
     }
 }
 
+// The host's original gyro-only orientation, kept for phones (the iOS device and iPhone controllers).
+#[derive(Clone, Copy)]
+pub struct GyroOnly {
+    angle: V3,
+    dir: [V3; 3],
+}
+
+impl Default for GyroOnly {
+    fn default() -> Self {
+        GyroOnly { angle: [0.0; 3], dir: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] }
+    }
+}
+
+impl GyroOnly {
+    fn step(&mut self, gyro: V3, dt: f32) {
+        for i in 0..3 {
+            self.angle[i] += gyro[i] * dt;
+        }
+        let w = gyro.map(|r| r * std::f32::consts::TAU * dt);
+        let theta = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+        if theta < 1e-7 {
+            return;
+        }
+        let k = w.map(|v| v / theta);
+        let (s, c) = theta.sin_cos();
+        let kx = [[0.0, -k[2], k[1]], [k[2], 0.0, -k[0]], [-k[1], k[0], 0.0]];
+        let mut r = [[0f32; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                let kk: f32 = (0..3).map(|m| kx[i][m] * kx[m][j]).sum();
+                r[i][j] = if i == j { 1.0 } else { 0.0 } + s * kx[i][j] + (1.0 - c) * kk;
+            }
+        }
+        let d = self.dir;
+        for i in 0..3 {
+            for j in 0..3 {
+                self.dir[i][j] = (0..3).map(|m| d[i][m] * r[m][j]).sum();
+            }
+        }
+        let norm = |v: V3| {
+            let l = len(v).max(1e-6);
+            v.map(|x| x / l)
+        };
+        let dot = |a: V3, b: V3| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let x = norm(self.dir[0]);
+        let y = norm(std::array::from_fn(|i| self.dir[1][i] - dot(self.dir[1], x) * x[i]));
+        let z = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
+        self.dir = [x, y, z];
+    }
+}
+
+// Gamepads get the fusion; phones keep the original orientation, which nobody could test with the fusion.
+#[derive(Clone, Copy)]
+pub enum Orientation {
+    Pad(Fusion),
+    Phone(GyroOnly),
+}
+
+impl Default for Orientation {
+    fn default() -> Self {
+        Orientation::Phone(GyroOnly::default())
+    }
+}
+
+impl Orientation {
+    pub fn update(&mut self, accel: V3, gyro: V3, pad: bool, dt: f32) {
+        match (self, pad) {
+            (Orientation::Pad(f), true) => f.update(accel, gyro, dt),
+            (Orientation::Phone(g), false) => g.step(gyro, dt),
+            (o, _) => {
+                *o = if pad { Orientation::Pad(Fusion::default()) } else { Orientation::Phone(GyroOnly::default()) };
+                o.update(accel, gyro, pad, dt);
+            }
+        }
+    }
+
+    pub fn rotation(&self) -> V3 {
+        match self {
+            Orientation::Pad(f) => f.rotation(),
+            Orientation::Phone(g) => g.angle,
+        }
+    }
+
+    pub fn orientation(&self) -> [V3; 3] {
+        match self {
+            Orientation::Pad(f) => f.orientation(),
+            Orientation::Phone(g) => g.dir,
+        }
+    }
+
+    // the gyro value the game reads: processed by the fusion for gamepads, as measured for phones
+    pub fn gyro(&self, raw: V3) -> V3 {
+        match self {
+            Orientation::Pad(f) => f.gyro(),
+            Orientation::Phone(_) => raw,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +241,30 @@ mod tests {
 
     fn close(a: &[f32], b: &[f32]) -> bool {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
+    }
+
+    #[test]
+    fn phones_keep_gyro_only_orientation() {
+        let mut o = Orientation::default();
+        for _ in 0..120 {
+            o.update([0.0, 0.0, -1.0], [0.25, 0.0, 0.0], false, 0.008333);
+        }
+        // a quarter turn around X, with no pull back toward gravity
+        assert!(close(o.orientation().as_flattened(), &[1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0]));
+        assert!(close(&o.rotation(), &[0.25, 0.0, 0.0]));
+        assert!(close(&o.gyro([0.25, 0.0, 0.0]), &[0.25, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn gamepads_use_fusion() {
+        let mut o = Orientation::default();
+        let mut f = Fusion::default();
+        for _ in 0..120 {
+            o.update([0.0, 0.0, -1.0], [0.25, 0.0, 0.0], true, 0.008333);
+            f.update([0.0, 0.0, -1.0], [0.25, 0.0, 0.0], 0.008333);
+        }
+        assert!(close(o.orientation().as_flattened(), f.orientation().as_flattened()));
+        assert!(close(&o.gyro([0.003, 0.0, 0.0]), &f.gyro()));
     }
 
     #[test]

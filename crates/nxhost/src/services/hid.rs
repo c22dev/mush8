@@ -121,9 +121,9 @@ fn push_touch(lifo: u64, sampling: u64, touches: &[(u32, f32, f32, u32)]) {
 
 static AT_REST: [std::sync::atomic::AtomicBool; crate::input::MAX_PLAYERS] = [const { std::sync::atomic::AtomicBool::new(true) }; crate::input::MAX_PLAYERS];
 
-fn push_sixaxis(lifo: u64, sampling: u64, m: Option<&crate::input::Motion>, fused: &crate::motion::Fusion) {
+fn push_sixaxis(lifo: u64, sampling: u64, m: Option<&crate::input::Motion>, fused: &crate::motion::Orientation) {
     let (tail, e) = lifo_slot(lifo, SIXAXIS_ENTRY);
-    let (accel, gyro) = m.map_or(([0.0, 0.0, -1.0], [0.0; 3]), |m| (m.accel, fused.gyro()));
+    let (accel, gyro) = m.map_or(([0.0, 0.0, -1.0], [0.0; 3]), |m| (m.accel, fused.gyro(m.gyro.map(|r| r / std::f32::consts::TAU))));
     write(e, sampling);
     write(e + 0x08, 5_000_000u64);
     write(e + 0x10, sampling);
@@ -146,7 +146,7 @@ fn start_input_thread() {
                 let mut pads = crate::input::Pads::new();
                 let mut present = [false; crate::input::MAX_PLAYERS];
                 let mut sampling = 0u64;
-                let mut fused = [crate::motion::Fusion::default(); crate::input::MAX_PLAYERS];
+                let mut fused = [crate::motion::Orientation::default(); crate::input::MAX_PLAYERS];
                 let mut moving = [false; crate::input::MAX_PLAYERS];
                 let mut last = std::time::Instant::now();
                 loop {
@@ -169,15 +169,16 @@ fn start_input_thread() {
                         if let Some(p) = st {
                             push_generic(npad + LIFO_FULLKEY, sampling, p, ATTR_CONNECTED | ATTR_WIRED);
                         }
-                        let motion = if present[i] { crate::input::MOTION.lock().unwrap()[i] } else { None };
+                        let sample = if present[i] { crate::input::MOTION.lock().unwrap()[i] } else { None };
+                        let (motion, from_pad) = (sample.map(|(m, _)| m), sample.is_some_and(|(_, pad)| pad));
                         let still = motion.is_none_or(|m| m.gyro.iter().all(|r| r.abs() < 0.05));
                         AT_REST[i].store(still, std::sync::atomic::Ordering::Relaxed);
                         if motion.is_some() && !std::mem::replace(&mut moving[i], true) {
                             eprintln!("[hid] motion data for player {}", i + 1);
                         }
                         match motion {
-                            Some(m) => fused[i].update(m.accel, m.gyro.map(|r| r / std::f32::consts::TAU), dt),
-                            None => fused[i] = crate::motion::Fusion::default(),
+                            Some(m) => fused[i].update(m.accel, m.gyro.map(|r| r / std::f32::consts::TAU), from_pad, dt),
+                            None => fused[i] = crate::motion::Orientation::default(),
                         }
                         if present[i] {
                             for l in SIXAXIS_LIFOS {

@@ -99,7 +99,8 @@ pub struct Motion {
     pub gyro: [f32; 3],
 }
 
-pub static MOTION: std::sync::Mutex<[Option<Motion>; MAX_PLAYERS]> = std::sync::Mutex::new([None; MAX_PLAYERS]);
+// each player's latest motion, and whether it comes from a gamepad (true) or a phone (false)
+pub static MOTION: std::sync::Mutex<[Option<(Motion, bool)>; MAX_PLAYERS]> = std::sync::Mutex::new([None; MAX_PLAYERS]);
 
 fn motion_enabled() -> bool {
     static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NX_MOTION").is_ok_and(|v| v == "1"));
@@ -337,11 +338,11 @@ impl Pads {
                 let sample = if !motion_enabled() {
                     None
                 } else if let Some(c) = slot {
-                    c.motion()
+                    c.motion().map(|m| (m, true))
                 } else if let Some(pad) = &remote {
-                    pad.motion
+                    pad.motion.map(|m| (m, false))
                 } else {
-                    phone_sample(phone, i)
+                    phone_sample(phone, i).map(|m| (m, false))
                 };
                 MOTION.lock().unwrap()[i] = sample;
                 if !(changed || !self.touch_init) {
