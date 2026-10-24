@@ -55,6 +55,12 @@ Or make an `.ipa` to install with AltStore / SideStore (no signing needed on the
 ```
 it ends up in `build/Mush8.ipa`
 
+Tests :
+```
+cargo test --workspace
+```
+They need no game files and no controller
+
 ## Multiplayer
 Pick a mode in the launcher, under Multiplayer :
 - LAN : players on the same network, a Switch can join too
