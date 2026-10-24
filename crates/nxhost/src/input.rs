@@ -200,12 +200,23 @@ pub struct Pads {
     fill: usize,
     touch_init: bool,
     phone: Phone,
+    #[cfg(target_os = "macos")]
+    sdl_failed: crate::sdl::OpenOnce,
 }
 
 impl Pads {
     pub fn new() -> Self {
         let extra = std::env::var("NX_EXTRA_PADS").ok().and_then(|v| v.parse().ok()).unwrap_or(0usize).min(MAX_PLAYERS - 1);
-        Self { slots: Default::default(), phones: Default::default(), extra, fill: 0, touch_init: false, phone: Default::default() }
+        Self {
+            slots: Default::default(),
+            phones: Default::default(),
+            extra,
+            fill: 0,
+            touch_init: false,
+            phone: Default::default(),
+            #[cfg(target_os = "macos")]
+            sdl_failed: Default::default(),
+        }
     }
 
     pub fn poll(&mut self) -> [Option<PadState>; MAX_PLAYERS] {
@@ -225,6 +236,8 @@ impl Pads {
                 if sdl { Vec::new() } else { GCController::controllers().iter().filter(|c| c.extendedGamepad().is_some()).collect() };
             #[cfg(target_os = "macos")]
             let sdl_ids = if sdl { crate::sdl::connected() } else { Vec::new() };
+            #[cfg(target_os = "macos")]
+            self.sdl_failed.keep(&sdl_ids);
             let mut changed = false;
             for s in self.slots.iter_mut() {
                 let gone = match s {
@@ -271,7 +284,7 @@ impl Pads {
                     continue;
                 }
                 let Some(i) = free(&self.slots, &self.phones) else { break };
-                let Some(pad) = crate::sdl::Pad::open(id) else { continue };
+                let Some(pad) = self.sdl_failed.open(id, || crate::sdl::Pad::open(id)) else { continue };
                 if i < 4 {
                     pad.set_player(i);
                 }

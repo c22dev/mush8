@@ -41,7 +41,7 @@ enum Target {
 }
 
 #[cfg(target_os = "macos")]
-const RUMBLE_MS: u32 = 1000;
+const RUMBLE_MS: u32 = 2000;
 #[cfg(target_os = "macos")]
 const RESEND: Duration = Duration::from_millis(500);
 
@@ -63,6 +63,19 @@ fn sdl_strength(v: [Value; 2]) -> (u16, u16) {
 #[cfg(target_os = "macos")]
 fn resend_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|t| now.duration_since(t) >= RESEND)
+}
+
+// Whether to send `strength` now, and the new state: the strength in force and when it was last sent.
+// The state is kept even when a send fails, so a held rumble is retried at the next resend.
+#[cfg(target_os = "macos")]
+type SdlState = Option<((u16, u16), Instant)>;
+
+#[cfg(target_os = "macos")]
+fn sdl_step(state: SdlState, strength: (u16, u16), now: Instant) -> (bool, SdlState) {
+    let sent = state.map_or((0, 0), |(v, _)| v);
+    let send = strength != sent || (strength != (0, 0) && resend_due(state.map(|(_, t)| t), now));
+    let next = if !send { state } else { (strength != (0, 0)).then_some((strength, now)) };
+    (send, next)
 }
 
 struct Shared {
@@ -259,13 +272,12 @@ fn run() {
                 #[cfg(target_os = "macos")]
                 if let Source::Sdl(id) = out.source {
                     let strength = sdl_strength(values[i]);
-                    let sent = out.sdl.map_or((0, 0), |(v, _)| v);
-                    let now = Instant::now();
-                    if strength != sent || (strength != (0, 0) && resend_due(out.sdl.map(|(_, t)| t), now)) {
+                    let (send, next) = sdl_step(out.sdl, strength, Instant::now());
+                    if send {
                         let ms = if strength == (0, 0) { 0 } else { RUMBLE_MS };
-                        let ok = crate::sdl::rumble(sdl3_sys::everything::SDL_JoystickID(id), strength.0, strength.1, ms);
-                        out.sdl = (ok && strength != (0, 0)).then_some((strength, now));
+                        crate::sdl::rumble(sdl3_sys::everything::SDL_JoystickID(id), strength.0, strength.1, ms);
                     }
+                    out.sdl = next;
                     continue;
                 }
                 let (l, r) = (values[i][0].feel(), values[i][1].feel());
@@ -310,6 +322,25 @@ mod tests {
         assert_eq!(sdl_strength([v(1.0, 340.0, 0.0, 200.0), Value::IDLE]), (32768, 0));
         let nan = Value { amp_low: f32::NAN, ..Value::IDLE };
         assert_eq!(sdl_strength([nan, nan]), (0, 0));
+    }
+
+    #[test]
+    fn rumble_outlasts_a_late_resend() {
+        // a wake just before a resend can push the next one to almost two resend periods
+        assert!(Duration::from_millis(RUMBLE_MS as u64) > RESEND * 2 + Duration::from_millis(500));
+    }
+
+    #[test]
+    fn sdl_step_keeps_retrying_held_rumble() {
+        let t = Instant::now();
+        let s = (1000, 2000);
+        assert_eq!(sdl_step(None, (0, 0), t), (false, None));
+        assert_eq!(sdl_step(None, s, t), (true, Some((s, t))));
+        // the same value is sent again once the resend is due, whatever happened to the last send
+        assert_eq!(sdl_step(Some((s, t)), s, t + Duration::from_millis(100)), (false, Some((s, t))));
+        let later = t + RESEND;
+        assert_eq!(sdl_step(Some((s, t)), s, later), (true, Some((s, later))));
+        assert_eq!(sdl_step(Some((s, t)), (0, 0), later), (true, None));
     }
 
     #[test]

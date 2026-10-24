@@ -48,6 +48,29 @@ pub fn rumble(id: SDL_JoystickID, low: u16, high: u16, ms: u32) -> bool {
     }
 }
 
+// Remembers pads that SDL lists but cannot open, so they are tried once and not on every poll.
+#[derive(Default)]
+pub struct OpenOnce {
+    failed: Vec<SDL_JoystickID>,
+}
+
+impl OpenOnce {
+    pub fn open<T>(&mut self, id: SDL_JoystickID, open: impl FnOnce() -> Option<T>) -> Option<T> {
+        if self.failed.contains(&id) {
+            return None;
+        }
+        let pad = open();
+        if pad.is_none() {
+            self.failed.push(id);
+        }
+        pad
+    }
+
+    pub fn keep(&mut self, connected: &[SDL_JoystickID]) {
+        self.failed.retain(|id| connected.contains(id));
+    }
+}
+
 pub struct Reading {
     pub buttons: u64,
     pub sticks: [f32; 4],
@@ -181,6 +204,20 @@ mod tests {
             unsafe { libc::sigaction(sig, std::ptr::null(), &mut old) };
             assert_eq!(old.sa_sigaction, libc::SIG_DFL, "signal {sig} handler was replaced");
         }
+    }
+
+    #[test]
+    fn open_once_skips_pads_that_failed() {
+        let mut once = OpenOnce::default();
+        let (a, b) = (SDL_JoystickID(1), SDL_JoystickID(2));
+        let mut calls = 0;
+        assert_eq!(once.open(a, || { calls += 1; None::<()> }), None);
+        assert_eq!(once.open(a, || { calls += 1; Some(()) }), None);
+        assert_eq!(calls, 1);
+        assert_eq!(once.open(b, || Some(())), Some(()));
+        // a pad that left is forgotten
+        once.keep(&[b]);
+        assert_eq!(once.open(a, || Some(())), Some(()));
     }
 
     #[test]
