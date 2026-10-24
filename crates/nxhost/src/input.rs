@@ -41,13 +41,66 @@ fn scripted(player: usize) -> u64 {
 
 pub const MAX_PLAYERS: usize = 8;
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum PadDriver {
+    Apple,
+    Sdl,
+}
+
+impl PadDriver {
+    pub fn parse(v: Option<&str>) -> PadDriver {
+        if v == Some("sdl") { PadDriver::Sdl } else { PadDriver::Apple }
+    }
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn pad_driver() -> PadDriver {
+    static DRIVER: std::sync::LazyLock<PadDriver> = std::sync::LazyLock::new(|| {
+        if cfg!(target_os = "macos") { PadDriver::parse(std::env::var("NX_PAD_DRIVER").ok().as_deref()) } else { PadDriver::Apple }
+    });
+    *DRIVER
+}
+
+fn use_sdl() -> bool {
+    #[cfg(target_os = "macos")]
+    return pad_driver() == PadDriver::Sdl && crate::sdl::init();
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+pub enum Ctl {
+    Apple(objc2::rc::Retained<GCController>),
+    #[cfg(target_os = "macos")]
+    Sdl(crate::sdl::Pad),
+}
+
+impl Ctl {
+    unsafe fn motion(&self) -> Option<Motion> {
+        match self {
+            Ctl::Apple(c) => unsafe { controller_motion(c) },
+            #[cfg(target_os = "macos")]
+            Ctl::Sdl(p) => p.motion(),
+        }
+    }
+
+    unsafe fn name(&self) -> String {
+        match self {
+            Ctl::Apple(c) => unsafe { c.vendorName() }.map_or("Controller".into(), |n| n.to_string()),
+            #[cfg(target_os = "macos")]
+            Ctl::Sdl(p) => p.name(),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Motion {
     pub accel: [f32; 3],
     pub gyro: [f32; 3],
 }
 
-pub static MOTION: std::sync::Mutex<[Option<Motion>; MAX_PLAYERS]> = std::sync::Mutex::new([None; MAX_PLAYERS]);
+// each player's latest motion, and whether it comes from a gamepad (true) or a phone (false)
+pub static MOTION: std::sync::Mutex<[Option<(Motion, bool)>; MAX_PLAYERS]> = std::sync::Mutex::new([None; MAX_PLAYERS]);
 
 fn motion_enabled() -> bool {
     static ON: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var("NX_MOTION").is_ok_and(|v| v == "1"));
@@ -141,18 +194,29 @@ pub static SLOT_NAMES: std::sync::Mutex<[Option<String>; MAX_PLAYERS]> = std::sy
 pub static FILL_TO: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub struct Pads {
-    slots: [Option<objc2::rc::Retained<GCController>>; MAX_PLAYERS],
+    slots: [Option<Ctl>; MAX_PLAYERS],
     phones: [Option<std::net::SocketAddr>; MAX_PLAYERS],
     extra: usize,
     fill: usize,
     touch_init: bool,
     phone: Phone,
+    #[cfg(target_os = "macos")]
+    sdl_failed: crate::sdl::OpenOnce,
 }
 
 impl Pads {
     pub fn new() -> Self {
         let extra = std::env::var("NX_EXTRA_PADS").ok().and_then(|v| v.parse().ok()).unwrap_or(0usize).min(MAX_PLAYERS - 1);
-        Self { slots: Default::default(), phones: Default::default(), extra, fill: 0, touch_init: false, phone: Default::default() }
+        Self {
+            slots: Default::default(),
+            phones: Default::default(),
+            extra,
+            fill: 0,
+            touch_init: false,
+            phone: Default::default(),
+            #[cfg(target_os = "macos")]
+            sdl_failed: Default::default(),
+        }
     }
 
     pub fn poll(&mut self) -> [Option<PadState>; MAX_PLAYERS] {
@@ -167,10 +231,22 @@ impl Pads {
 
     fn poll_pads(&mut self) -> [Option<PadState>; MAX_PLAYERS] {
         objc2::rc::autoreleasepool(|_| unsafe {
-            let connected: Vec<_> = GCController::controllers().iter().filter(|c| c.extendedGamepad().is_some()).collect();
+            let sdl = use_sdl();
+            let connected: Vec<_> =
+                if sdl { Vec::new() } else { GCController::controllers().iter().filter(|c| c.extendedGamepad().is_some()).collect() };
+            #[cfg(target_os = "macos")]
+            let sdl_ids = if sdl { crate::sdl::connected() } else { Vec::new() };
+            #[cfg(target_os = "macos")]
+            self.sdl_failed.keep(&sdl_ids);
             let mut changed = false;
             for s in self.slots.iter_mut() {
-                if s.as_ref().is_some_and(|c| !connected.iter().any(|n| std::ptr::eq(&**n, &**c))) {
+                let gone = match s {
+                    Some(Ctl::Apple(c)) => !connected.iter().any(|n| std::ptr::eq(&**n, &**c)),
+                    #[cfg(target_os = "macos")]
+                    Some(Ctl::Sdl(p)) => !sdl_ids.contains(&p.id()),
+                    None => false,
+                };
+                if gone {
                     *s = None;
                     changed = true;
                 }
@@ -185,7 +261,7 @@ impl Pads {
             }
             let free = |slots: &[Option<_>; MAX_PLAYERS], phones: &[Option<_>; MAX_PLAYERS]| (0..MAX_PLAYERS).find(|&i| slots[i].is_none() && phones[i].is_none());
             for c in connected {
-                if self.slots.iter().flatten().any(|s| std::ptr::eq(&**s, &*c)) {
+                if self.slots.iter().flatten().any(|s| matches!(s, Ctl::Apple(s) if std::ptr::eq(&**s, &*c))) {
                     continue;
                 }
                 if let Some(i) = free(&self.slots, &self.phones) {
@@ -198,9 +274,26 @@ impl Pads {
                         }
                     }
                     eprintln!("[input] {} is player {}", c.vendorName().map_or("gamepad".into(), |n| n.to_string()), i + 1);
-                    self.slots[i] = Some(c);
+                    self.slots[i] = Some(Ctl::Apple(c));
                     changed = true;
                 }
+            }
+            #[cfg(target_os = "macos")]
+            for id in sdl_ids {
+                if self.slots.iter().flatten().any(|s| matches!(s, Ctl::Sdl(p) if p.id() == id)) {
+                    continue;
+                }
+                let Some(i) = free(&self.slots, &self.phones) else { break };
+                let Some(pad) = self.sdl_failed.open(id, || crate::sdl::Pad::open(id)) else { continue };
+                if i < 4 {
+                    pad.set_player(i);
+                }
+                if motion_enabled() {
+                    pad.enable_motion();
+                }
+                eprintln!("[input] {} is player {}", pad.name(), i + 1);
+                self.slots[i] = Some(Ctl::Sdl(pad));
+                changed = true;
             }
             for &(addr, _) in &phones {
                 if self.phones.contains(&Some(addr)) {
@@ -225,8 +318,15 @@ impl Pads {
             let phone = &mut self.phone;
             for (i, slot) in self.slots.iter().enumerate() {
                 let mut acc = Acc { buttons: scripted(i), ..Default::default() };
-                if let Some(g) = slot.as_ref().and_then(|c| c.extendedGamepad()) {
-                    acc.gamepad(&g);
+                match slot {
+                    Some(Ctl::Apple(c)) => {
+                        if let Some(g) = c.extendedGamepad() {
+                            acc.gamepad(&g);
+                        }
+                    }
+                    #[cfg(target_os = "macos")]
+                    Some(Ctl::Sdl(p)) => acc.sdl(&p.read()),
+                    None => {}
                 }
                 let remote = self.phones[i].and_then(|a| phones.iter().find(|(p, _)| *p == a)).map(|(_, pad)| *pad);
                 if let Some(pad) = &remote {
@@ -251,18 +351,18 @@ impl Pads {
                 let sample = if !motion_enabled() {
                     None
                 } else if let Some(c) = slot {
-                    controller_motion(c)
+                    c.motion().map(|m| (m, true))
                 } else if let Some(pad) = &remote {
-                    pad.motion
+                    pad.motion.map(|m| (m, false))
                 } else {
-                    phone_sample(phone, i)
+                    phone_sample(phone, i).map(|m| (m, false))
                 };
                 MOTION.lock().unwrap()[i] = sample;
                 if !(changed || !self.touch_init) {
                     continue;
                 }
                 let name = match slot {
-                    Some(c) => Some(c.vendorName().map_or("Controller".into(), |n| n.to_string())),
+                    Some(c) => Some(c.name()),
                     None if remote.is_some() => Some("iPhone".into()),
                     None if i == 0 && cfg!(target_os = "ios") => Some("Touch controls".into()),
                     None if i == 0 => Some("Keyboard".into()),
@@ -355,6 +455,15 @@ impl Acc {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn sdl(&mut self, r: &crate::sdl::Reading) {
+        self.buttons |= r.buttons;
+        self.lx += r.sticks[0];
+        self.ly += r.sticks[1];
+        self.rx += r.sticks[2];
+        self.ry += r.sticks[3];
+    }
+
     fn remote(&mut self, pad: &crate::remote::Pad) {
         self.buttons |= pad.buttons;
         self.lx += pad.sticks[0];
@@ -421,5 +530,19 @@ impl Acc {
             }
         }
         p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pad_driver_parse() {
+        assert_eq!(PadDriver::parse(None), PadDriver::Apple);
+        assert_eq!(PadDriver::parse(Some("apple")), PadDriver::Apple);
+        assert_eq!(PadDriver::parse(Some("sdl")), PadDriver::Sdl);
+        assert_eq!(PadDriver::parse(Some("SDL")), PadDriver::Apple);
+        assert_eq!(PadDriver::parse(Some("")), PadDriver::Apple);
     }
 }

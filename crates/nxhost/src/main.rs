@@ -13,9 +13,12 @@ mod ipc;
 mod kernel;
 mod loader;
 mod mem;
+mod motion;
 mod movie;
 mod remote;
 mod services;
+#[cfg(target_os = "macos")]
+mod sdl;
 mod shm;
 mod stubs;
 mod nvn;
@@ -194,6 +197,9 @@ fn apply_launcher_settings() {
     }
     if field("rumble").as_deref() == Some("false") {
         unsafe { std::env::set_var("NX_RUMBLE", "0") };
+    }
+    if field("gamepad_driver").as_deref() == Some("sdl") {
+        unsafe { std::env::set_var("NX_PAD_DRIVER", "sdl") };
     }
     if field("spatial_audio").as_deref() == Some("false") {
         unsafe { std::env::set_var("NX_SPATIAL", "0") };
