@@ -62,6 +62,7 @@ final class Settings: ObservableObject {
     @Published var pipelineArchive = false
     @Published var prewarm = true
     @Published var rumble = true
+    @Published var padDriver = "apple"
     @Published var spatial = true
     @Published var backgroundCompile = true
     @Published var motion = false
@@ -91,6 +92,7 @@ final class Settings: ObservableObject {
         pipelineArchive = j["pipeline_archive"] as? Bool ?? false
         prewarm = j["prewarm_pipelines"] as? Bool ?? true
         rumble = j["rumble"] as? Bool ?? true
+        padDriver = j["gamepad_driver"] as? String ?? "apple"
         spatial = j["spatial_audio"] as? Bool ?? true
         backgroundCompile = j["background_compile"] as? Bool ?? true
         motion = j["motion_controls"] as? Bool ?? false
@@ -109,7 +111,7 @@ final class Settings: ObservableObject {
         let j: [String: Any] = [
             "folder": folder, "keys": keys, "base": base, "update": update, "dlc": dlc, "network": network,
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
-            "prewarm_pipelines": prewarm, "rumble": rumble, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
+            "prewarm_pipelines": prewarm, "rumble": rumble, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
             "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
         ]
@@ -134,6 +136,7 @@ final class Settings: ObservableObject {
         if pipelineArchive { env["NX_PIPELINE_ARCHIVE"] = "1" }
         if prewarm { env["NX_PREWARM"] = "1" }
         if !rumble { env["NX_RUMBLE"] = "0" }
+        env["NX_PAD_DRIVER"] = padDriver
         if !spatial { env["NX_SPATIAL"] = "0" }
         if !backgroundCompile { env["NX_SYNC_SHADERS"] = "1" }
         env["NX_MOTION"] = motion ? "1" : "0"
@@ -433,6 +436,12 @@ struct LauncherView: View {
             Toggle("Pipeline archive", isOn: $s.pipelineArchive)
             Toggle("Prewarm pipelines", isOn: $s.prewarm)
             Toggle(isOn: $s.backgroundCompile) { labeled("Background shader compiling", "Builds the game's graphics pipelines in the background at startup") }
+            Picker(selection: $s.padDriver) {
+                Text("Apple").tag("apple")
+                Text("SDL").tag("sdl")
+            } label: {
+                labeled("Gamepad driver", "SDL supports more controllers, and rumble on more of them. Apple follows the button remapping in System Settings")
+            }
             Toggle("Vibration", isOn: $s.rumble)
             Toggle("Motion controls", isOn: $s.motion)
             Toggle(isOn: $s.spatial) {

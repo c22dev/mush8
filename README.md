@@ -56,6 +56,12 @@ Or make an `.ipa` to install with AltStore / SideStore (no signing needed on the
 ```
 it ends up in `build/Mush8.ipa`
 
+Tests :
+```
+cargo test --workspace
+```
+They need no game files and no controller
+
 ## Multiplayer
 Pick a mode in the launcher, under Multiplayer :
 - LAN : players on the same network, a Switch can join too
@@ -72,6 +78,8 @@ The touchscreen works too : tap the game on iOS, click it on macOS
 Motion controls (gyro steering) are off by default, turn them on in the launcher
 
 An iPhone can be a controller too : open Mush8 on it and tap "Use as a controller for a Mac" (no game files needed). It finds the Mac running Mush8 on the same Wi-Fi and joins as the next player with its touch controls (and its motion, if Motion controls is on in the Mac launcher). Turn "iPhone controllers" on in the Mac launcher (it is by default), or on an iPad playing the game
+
+On macOS, if your controller or a part of it (for example rumble) does not work, set "Gamepad driver" to SDL in the launcher
 
 ## Limitations
 - free Apple IDs and the `.ipa` (AltStore / SideStore) don't get the extended virtual addressing entitlement, so the game runs with a smaller 5 GB memory layout there (a paid account gets the full one)
