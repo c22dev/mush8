@@ -62,6 +62,18 @@ cargo test --workspace
 ```
 They need no game files and no controller
 
+## Graphics
+On a Mac, the launcher's Settings go past what the Switch draws :
+- Console mode : Docked renders at 1080p, 1440p or 4K (MK8D stops at 1080p, Mush8 patches its output size and memory budgets)
+- Supersampling : when the console mode is bigger than the screen (4K on a 1440p display), the image is filtered down to the screen for smooth edges
+- Full resolution 3D : the game draws its 3D scene at 75% of the output and scales it up, this draws it at 100%
+- High quality shadows : shadow maps at twice the size
+- 120 fps : MetalFX makes an in-between image for every frame (macOS / iOS 26). A 60 or 144 Hz display switches to its 120 Hz mode while playing. The game still runs at 60, so controls don't get faster. Cmd+I switches it off and on while playing
+- Full frame rate split screen : with 3 or 4 players the game draws each screen every other frame, this draws them all every frame
+- Performance HUD : Metal's frame rate and GPU time over the game
+
+`tools/race-bench.sh` boots straight into a race and prints how fast it renders
+
 ## Multiplayer
 Pick a mode in the launcher, under Multiplayer :
 - LAN : players on the same network, a Switch can join too

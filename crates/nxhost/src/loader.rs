@@ -213,15 +213,17 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
         icache_flush(m.base, m.size);
         eprintln!("[loader] {:8} at {:#x} (text {:#x}, trampolines {:#x})", m.name, m.base, m.text, tsize);
     }
+    #[cfg(target_os = "macos")]
+    quality_patches(&mods)?;
     debug_breakpoints(&mods)?;
     Ok(mods)
 }
 
 fn display_config() -> [(u32, u64); 5] {
-    let (size, pool, render, root, os) = if crate::services::vi::uhd() {
-        (3840 | 2160 << 32, 0x1600_0000, 0x3000_0000, 0xE050_0000, crate::services::vi::UHD_HEAP)
-    } else {
-        (1920 | 1080 << 32, 0x580_0000, 0x1000_0000, 0xB050_0000, 0xC1C0_0000)
+    let (size, pool, render, root, os) = match crate::services::vi::docked_height() {
+        2160 => (3840 | 2160 << 32, 0x1600_0000, 0x3000_0000, 0xE050_0000, crate::services::vi::UHD_HEAP),
+        1440 => (2560 | 1440 << 32, 0xA00_0000, 0x1900_0000, 0xBE50_0000, crate::services::vi::QHD_HEAP),
+        _ => (1920 | 1080 << 32, 0x580_0000, 0x1000_0000, 0xB050_0000, 0xC1C0_0000),
     };
     [
         (keypage::DISPLAY_SIZE, size),
@@ -244,6 +246,57 @@ fn net_mode() -> u8 {
         Ok(_) => 0,
         Err(_) => std::env::var("NX_LAN").is_ok_and(|v| v == "1") as u8,
     }
+}
+
+#[cfg(target_os = "macos")]
+struct QualityPatch {
+    env: &'static str,
+    module: &'static str,
+    site: u64,
+    from: &'static [u32],
+    to: &'static [u32],
+}
+
+#[cfg(target_os = "macos")]
+const QUALITY_PATCHES: &[QualityPatch] = &[
+    QualityPatch { env: "NX_FULL_RES", module: "main", site: 0x6f81ec, from: &[0xB97C_DB48, 0xB97C_DF49], to: &[0x52A7_F008, 0x52A7_F009] },
+    QualityPatch { env: "NX_FULL_RES", module: "main", site: 0x6f8200, from: &[0xB400_0236], to: &[0x1400_0011] },
+    QualityPatch {
+        env: "NX_HQ_SHADOWS",
+        module: "main",
+        site: 0x6d7834,
+        from: &[
+            0xB95A_1109, 0xB95A_3108, 0x910E_02C0, 0x9100_63E1, 0x1E22_1821, 0x1E21_2000, 0x1E21_CC00, 0x1E22_0121, 0x1E20_0821,
+            0x1E38_002A, 0x6B09_015F, 0x1E22_0101, 0x1E20_0820, 0x1A8A_C129, 0x7100_815F, 0x321B_03EA, 0x1A89_B149, 0x1E38_000B,
+            0x6B08_017F, 0x1A8B_C108, 0x7100_817F, 0x1A88_B148, 0x2903_23E9,
+        ],
+        to: &[
+            0xB95A_1109, 0xB95A_3108, 0x531F_7929, 0x531F_7908, 0x1E22_1821, 0x1E21_2000, 0x1E21_CC00, 0x1E22_0121, 0x1E20_0821,
+            0x1E38_002A, 0x6B09_015F, 0x1A8A_C129, 0x1E22_0101, 0x1E20_0820, 0x1E38_000B, 0x6B08_017F, 0x1A8B_C108, 0x910E_02C0,
+            0x9100_63E1, 0xD503_201F, 0xD503_201F, 0xD503_201F, 0x2903_23E9,
+        ],
+    },
+];
+
+#[cfg(target_os = "macos")]
+fn quality_patches(mods: &[Module]) -> Result<()> {
+    for p in QUALITY_PATCHES.iter().filter(|p| std::env::var(p.env).is_ok_and(|v| v == "1")) {
+        let Some(m) = mods.iter().find(|m| m.name == p.module) else { continue };
+        let addr = m.base + p.site;
+        let len = 4 * p.from.len() as u64;
+        let now = unsafe { std::slice::from_raw_parts(addr as *const u32, p.from.len()) };
+        if now != p.from {
+            eprintln!("[loader] {}: {}+{:#x} has other code, not patched", p.env, p.module, p.site);
+            continue;
+        }
+        let (lo, hi) = (addr & !(PAGE - 1), (addr + len).next_multiple_of(PAGE));
+        crate::mem::protect(lo, hi - lo, perm::RW)?;
+        unsafe { std::ptr::copy_nonoverlapping(p.to.as_ptr(), addr as *mut u32, p.to.len()) };
+        crate::mem::protect(lo, hi - lo, perm::RX)?;
+        icache_flush(lo, hi - lo);
+        eprintln!("[loader] {}: patched {}+{:#x}", p.env, p.module, p.site);
+    }
+    Ok(())
 }
 
 fn debug_breakpoints(mods: &[Module]) -> Result<()> {

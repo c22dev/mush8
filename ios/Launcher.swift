@@ -1,11 +1,19 @@
 // Mush8 - Launcher.swift
 // Constantin Clerc (c22dev) - 0.1
 import Combine
+import Metal
+import MetalFX
 import Network
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 import os
+
+@MainActor func canInterpolate() -> Bool {
+    let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
+    guard let screen, screen.maximumFramesPerSecond >= 100, let device = MTLCreateSystemDefaultDevice() else { return false }
+    return MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
+}
 
 func nspKind(_ url: URL) -> String? {
     guard let h = try? FileHandle(forReadingFrom: url) else { return nil }
@@ -33,6 +41,7 @@ final class Settings: ObservableObject {
     @Published var prewarm = true
     @Published var rumble = true
     @Published var spatial = true
+    @Published var interpolate = false
     @Published var backgroundCompile = true
     @Published var motion = false
     @Published var handheld = true
@@ -55,6 +64,7 @@ final class Settings: ObservableObject {
         prewarm = json["prewarm_pipelines"] as? Bool ?? true
         rumble = json["rumble"] as? Bool ?? true
         spatial = json["spatial_audio"] as? Bool ?? true
+        interpolate = json["frame_interpolation"] as? Bool ?? false
         backgroundCompile = json["background_compile"] as? Bool ?? true
         motion = json["motion_controls"] as? Bool ?? false
         handheld = json["handheld"] as? Bool ?? true
@@ -73,6 +83,7 @@ final class Settings: ObservableObject {
         json["prewarm_pipelines"] = prewarm
         json["rumble"] = rumble
         json["spatial_audio"] = spatial
+        json["frame_interpolation"] = interpolate
         json["background_compile"] = backgroundCompile
         json["motion"] = nil
         json["motion_controls"] = motion
@@ -295,6 +306,13 @@ struct LauncherView: View {
                     }
                 } footer: {
                     Text("Handheld renders at 720p: lighter on the GPU and battery")
+                }
+                if canInterpolate() {
+                    Section {
+                        Toggle("120 fps", isOn: $s.interpolate)
+                    } footer: {
+                        Text("MetalFX makes an in-between image for every frame. Uses more GPU and battery, and stays at 60 in Low Power Mode")
+                    }
                 }
                 Section {
                     Picker("Screen", selection: $s.fillScreen) {

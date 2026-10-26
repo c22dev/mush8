@@ -24,29 +24,31 @@ pub fn docked() -> bool {
 }
 
 pub const UHD_HEAP: u64 = 0xFFE0_0000;
+pub const QHD_HEAP: u64 = 0xD000_0000;
 
-pub fn uhd() -> bool {
-    static U: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        if !docked() || !std::env::var("NX_4K").is_ok_and(|v| v == "1") {
-            return false;
-        }
-        let fits = crate::kernel::aspace().layout.heap_size >= UHD_HEAP && crate::gfx::max_buffer_len() >= UHD_HEAP;
+pub fn docked_height() -> u32 {
+    static H: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+        let on = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");
+        let (height, heap) = if on("NX_4K") {
+            (2160, UHD_HEAP)
+        } else if on("NX_1440P") {
+            (1440, QHD_HEAP)
+        } else {
+            return 1080;
+        };
+        let fits = crate::kernel::aspace().layout.heap_size >= heap && crate::gfx::max_buffer_len() >= heap;
         if !fits {
-            eprintln!("[vi] 4K needs a {UHD_HEAP:#x}-byte guest heap the GPU can map: staying at 1080p");
+            eprintln!("[vi] {height}p needs a {heap:#x}-byte guest heap the GPU can map: staying at 1080p");
+            return 1080;
         }
-        fits
+        height
     });
-    *U
+    if docked() { *H } else { 720 }
 }
 
 pub fn resolution() -> (u32, u32) {
-    if uhd() {
-        (3840, 2160)
-    } else if docked() {
-        (1920, 1080)
-    } else {
-        (1280, 720)
-    }
+    let h = docked_height();
+    (h * 16 / 9, h)
 }
 
 const DISPLAY_ID: u64 = 0;
