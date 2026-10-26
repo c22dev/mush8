@@ -1,8 +1,5 @@
 // Mush8 - fi.rs
-//! NX_METALFX=1: 120 fps with MetalFX frame interpolation. After each frame, the shown image and the depth buffer
-//! the frame drew most into (the 3D scene's, resampled to the image's size since the game renders it smaller) go to
-//! `MTLFXFrameInterpolator`, which makes the image halfway from the last frame: it is shown half a frame before the
-//! real one. The game has no motion vectors, so they stay zero and MetalFX finds the movement itself.
+// Constantin Clerc (c22dev) - 0.1
 use super::textures::TexKey;
 use crate::gfx::{self, Shared, Texture};
 use objc2::runtime::ProtocolObject;
@@ -18,7 +15,6 @@ type Interpolator = ProtocolObject<dyn MTLFXFrameInterpolator>;
 struct Setup {
     key: (usize, usize, MTLPixelFormat),
     fx: Shared<Interpolator>,
-    /// The last two frames, alternating.
     color: [Shared<Texture>; 2],
     depth: Shared<Texture>,
     motion: Shared<Texture>,
@@ -46,12 +42,9 @@ fragment D fs(V v [[stage_in]], depth2d<float> src [[texture(0)]], constant floa
 
 #[derive(Default)]
 pub struct State {
-    /// Depth buffers the frame drew into, with how many draws went to each.
     depths: HashMap<TexKey, (Shared<Texture>, u32)>,
     setup: Option<Setup>,
-    /// Which of the two colour textures holds the last frame, if the last frame had a 3D scene.
     prev: Option<usize>,
-    /// The next interpolation follows a break (menus, Cmd+I): MetalFX's history starts over.
     fresh: bool,
     failed: bool,
 }
@@ -136,8 +129,6 @@ fn create(w: usize, h: usize, color: MTLPixelFormat) -> Option<Setup> {
     Some(setup)
 }
 
-/// Called with the image the game just finished. Returns the in-between image to show before it, once two frames
-/// with a 3D scene are in.
 pub fn frame(st: &mut State, window: &Shared<Texture>) -> Option<Shared<Texture>> {
     let depths = std::mem::take(&mut st.depths);
     if gfx::INTERP_OFF.load(std::sync::atomic::Ordering::Relaxed) || !gfx::high_refresh() {
@@ -181,7 +172,6 @@ pub fn frame(st: &mut State, window: &Shared<Texture>) -> Option<Shared<Texture>
     }
     enc.endEncoding();
     let out = st.prev.map(|prev| {
-        // The game's camera isn't known: MetalFX gets typical values, it only uses them to weigh depth.
         unsafe {
             let fx = &s.fx.0;
             fx.setColorTexture(Some(&s.color[cur].0));

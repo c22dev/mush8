@@ -9,7 +9,6 @@ import UIKit
 import UniformTypeIdentifiers
 import os
 
-/// 120 fps needs a ProMotion display and a GPU MetalFX can interpolate on.
 @MainActor func canInterpolate() -> Bool {
     let screen = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
     guard let screen, screen.maximumFramesPerSecond >= 100, let device = MTLCreateSystemDefaultDevice() else { return false }

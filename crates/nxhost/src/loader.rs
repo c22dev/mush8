@@ -213,6 +213,7 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
         icache_flush(m.base, m.size);
         eprintln!("[loader] {:8} at {:#x} (text {:#x}, trampolines {:#x})", m.name, m.base, m.text, tsize);
     }
+    #[cfg(target_os = "macos")]
     quality_patches(&mods)?;
     debug_breakpoints(&mods)?;
     Ok(mods)
@@ -247,8 +248,7 @@ fn net_mode() -> u8 {
     }
 }
 
-/// Optional changes to the game's code, each checked against the words it replaces so another game version is left
-/// alone.
+#[cfg(target_os = "macos")]
 struct QualityPatch {
     env: &'static str,
     module: &'static str,
@@ -257,15 +257,10 @@ struct QualityPatch {
     to: &'static [u32],
 }
 
+#[cfg(target_os = "macos")]
 const QUALITY_PATCHES: &[QualityPatch] = &[
-    // NX_FULL_RES: gsys sizes its 3D render buffers as the screen times a scale (0.75 docked, x26+0x3cd8/0x3cdc,
-    // further multiplied by a per-view factor). Load 1.0 for both and skip the per-view factor: the scene renders at
-    // the full output resolution.
     QualityPatch { env: "NX_FULL_RES", module: "main", site: 0x6f81ec, from: &[0xB97C_DB48, 0xB97C_DF49], to: &[0x52A7_F008, 0x52A7_F009] },
     QualityPatch { env: "NX_FULL_RES", module: "main", site: 0x6f8200, from: &[0xB400_0236], to: &[0x1400_0011] },
-    // NX_HQ_SHADOWS: the shadow map is the scene's depth_shadow_tex_width/height (1024 or 1536) scaled with the
-    // screen and capped there. Double both before use; the cap of 32 below which the original clamped is dropped to
-    // make room (a shadow map is never that small).
     QualityPatch {
         env: "NX_HQ_SHADOWS",
         module: "main",
@@ -283,6 +278,7 @@ const QUALITY_PATCHES: &[QualityPatch] = &[
     },
 ];
 
+#[cfg(target_os = "macos")]
 fn quality_patches(mods: &[Module]) -> Result<()> {
     for p in QUALITY_PATCHES.iter().filter(|p| std::env::var(p.env).is_ok_and(|v| v == "1")) {
         let Some(m) = mods.iter().find(|m| m.name == p.module) else { continue };

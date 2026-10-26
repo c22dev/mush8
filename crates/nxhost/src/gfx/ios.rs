@@ -37,7 +37,6 @@ pub fn wait_foreground() {
     });
 }
 
-/// Asks for the display's top refresh rate: on its own, ProMotion keeps a Metal layer at 60 Hz.
 pub fn request_high_refresh() {
     static DONE: AtomicBool = AtomicBool::new(false);
     if DONE.swap(true, Relaxed) {

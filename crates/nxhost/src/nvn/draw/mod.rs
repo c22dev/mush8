@@ -730,7 +730,7 @@ pub fn present(texture: u64) {
                 dump_at(&t);
             }
             let frames: Vec<&gfx::Texture> = if show { mid.iter().chain([&t]).map(|t| &*t.0).collect() } else { Vec::new() };
-            crate::kernel::blocking(|| gfx::present_frames(&frames, !UPPER_LEFT.load(Relaxed)));
+            crate::kernel::blocking(|| gfx::present(&frames, !UPPER_LEFT.load(Relaxed)));
         }
     });
 }

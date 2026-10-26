@@ -1,7 +1,5 @@
 // Mush8 - downscale.rs
-//! Supersampling: when the game's image is taller than the screen (4K on a 1440p display), it is filtered down to the
-//! screen's size before frame interpolation and presenting, averaging every source pixel it covers in linear light,
-//! instead of the present pass picking a few with one bilinear tap. NX_SUPERSAMPLE=0 leaves it to the present pass.
+// Constantin Clerc (c22dev) - 0.1
 use super::{Shared, Texture, gpu};
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
@@ -20,8 +18,6 @@ vertex V vs(uint id [[vertex_id]]) {
 }
 static float3 lin(float3 c) { return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045); }
 static float3 enc(float3 c) { return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308); }
-// n x n bilinear taps spread evenly over the source footprint of one destination pixel: a box filter of the
-// footprint's size, slightly widened by the taps' own 2x2 average. `raw`: the texture decodes sRGB itself.
 fragment float4 fs(V v [[stage_in]], texture2d<float> src [[texture(0)]], sampler s [[sampler(0)]], constant float3& p [[buffer(0)]]) {
     float2 f = p.xy;
     bool raw = p.z != 0.0;
@@ -61,12 +57,10 @@ fn pipeline(format: MTLPixelFormat) -> Option<Shared<ProtocolObject<dyn MTLRende
 
 static SCALE: AtomicU32 = AtomicU32::new(0x3F80_0000);
 
-/// How much the last image was scaled down: the window crop, in the game's pixels, scales with it.
 pub fn scale() -> f32 {
     f32::from_bits(SCALE.load(Relaxed))
 }
 
-/// Returns `tex` filtered down to the screen's height if it is taller than the screen, else `tex` itself.
 pub fn fit(tex: &Shared<Texture>) -> Shared<Texture> {
     let out = filter(tex);
     SCALE.store((out.0.width() as f32 / tex.0.width() as f32).to_bits(), Relaxed);

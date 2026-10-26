@@ -26,8 +26,6 @@ pub fn docked() -> bool {
 pub const UHD_HEAP: u64 = 0xFFE0_0000;
 pub const QHD_HEAP: u64 = 0xD000_0000;
 
-/// Docked output height: 2160 with NX_4K=1, 1440 with NX_1440P=1, else the game's own 1080. The bigger ones need a
-/// larger guest heap the GPU can map.
 pub fn docked_height() -> u32 {
     static H: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
         let on = |k: &str| std::env::var(k).is_ok_and(|v| v == "1");

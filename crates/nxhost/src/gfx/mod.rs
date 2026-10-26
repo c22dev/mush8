@@ -14,11 +14,8 @@ pub use ios::{request_high_refresh, run_app, set_touch_controls, wait_foreground
 #[cfg(target_os = "macos")]
 pub fn request_high_refresh() {}
 
-/// The game screen's top refresh rate, 0 until known.
 static MAX_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Whether the screen can show two images per game frame. At 60 Hz the second one would hold the game up to half
-/// speed; Low Power Mode caps ProMotion at 60 Hz.
 pub fn high_refresh() -> bool {
     let fps = MAX_FPS.load(std::sync::atomic::Ordering::Relaxed);
     (fps == 0 || fps >= 100) && !objc2_foundation::NSProcessInfo::processInfo().isLowPowerModeEnabled()
@@ -512,13 +509,7 @@ fn present_params(tex: &Texture, flip: bool) -> (PresentParams, f64) {
     (p, (w / h) as f64)
 }
 
-pub fn present(tex: Option<&Texture>, flip: bool) {
-    present_frames(tex.as_slice(), flip);
-}
-
-/// Shows `texs` within one game frame: the first right away, the others spread evenly across the frame. Frame
-/// interpolation passes its in-between images first and the real frame last. Empty keeps the last image up.
-pub fn present_frames(texs: &[&Texture], flip: bool) {
+pub fn present(texs: &[&Texture], flip: bool) {
     #[cfg(target_os = "ios")]
     if !ios::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
         return;
@@ -587,12 +578,8 @@ pub fn present_frames(texs: &[&Texture], flip: bool) {
     }
 }
 
-/// Cmd+I switches frame interpolation off and on while playing, to compare.
 pub static INTERP_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Frame interpolation shows 120 images a second, which a 144 Hz display can't space evenly: while the game runs,
-/// such a display switches to its 120 Hz mode at the same resolution, if it has one. macOS switches it back when
-/// Mush8 quits.
 #[cfg(target_os = "macos")]
 fn refresh_120(screen: &objc2_app_kit::NSScreen) {
     use std::ffi::c_void;
@@ -650,7 +637,6 @@ fn refresh_120(screen: &objc2_app_kit::NSScreen) {
     }
 }
 
-/// The game window's height in pixels.
 pub fn screen_height() -> Option<f64> {
     let layer = LAYER.get()?;
     Some(layer.0.bounds().size.height * layer.0.contentsScale())

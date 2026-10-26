@@ -7,7 +7,6 @@ import MetalFX
 import SwiftUI
 import SystemConfiguration
 
-/// 120 fps needs a GPU MetalFX can interpolate on (macOS 26).
 let canInterpolate: Bool = {
     guard #available(macOS 26, *), let device = MTLCreateSystemDefaultDevice() else { return false }
     return MTLFXFrameInterpolatorDescriptor.supportsDevice(device)
