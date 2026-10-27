@@ -81,7 +81,7 @@ Any browser can be a controller too : turn "Remote controller" and "Browser cont
 On macOS, if your controller or a part of it (for example rumble) does not work, set "Gamepad driver" to SDL in the launcher
 
 ## Mods
-Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS. Mods load in name order; later mods win file conflicts.
+Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS, to turn each mod on or off. On macOS, drag a mod up or down in that list to change its order. Mods apply from top to bottom, so a lower mod wins when two mods change the same file. New mods go to the bottom.
 
 Use Browse GameBanana to search Mario Kart 8 Deluxe mods by name, section, URL or ID, then choose a file to download and install. The app supports ZIP, 7z and RAR, displays download progress, and supports cancellation. Existing mods are not overwritten. Downloads are limited to 512 MiB and extraction to 2 GiB / 20,000 entries. The flow was informed by [SimpleModDownloader](https://github.com/PoloNX/SimpleModDownloader).
 
