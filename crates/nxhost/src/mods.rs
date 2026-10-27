@@ -184,7 +184,7 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
             let Node::File(p) = node else { bail!("{key}: a text must be a .txt file") };
             let label = key.strip_suffix(".txt").with_context(|| format!("{key}: a text must be a .txt file"))?;
             let text = std::fs::read_to_string(p)?;
-            if let Err(e) = m.set_text(label, text.trim_end_matches(['\r', '\n'])) {
+            if let Err(e) = m.add_text(label, text.trim_end_matches(['\r', '\n'])) {
                 eprintln!("[mods] skipped {key}: {e}");
             }
         }
