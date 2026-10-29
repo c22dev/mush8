@@ -78,7 +78,15 @@ Any browser can be a controller too : turn "Remote controller" and "Browser cont
 On macOS, if your controller or a part of it (for example rumble) does not work, set "Gamepad driver" to SDL in the launcher
 
 ## Mods
-Mush8 loads mods from a `mods` folder in the same folder as your game files. This works on macOS only for now. Each mod is a folder inside `mods`, and it must contain a `romfs` folder, an `exefs` folder, or both In the launcher, use Game data → Mods → Customize to turn each one on or off
+Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS. Mods load in name order; later mods win file conflicts.
+
+Use Browse GameBanana to search Mario Kart 8 Deluxe mods by name, section, URL or ID, then choose a file to download and install. The app supports ZIP, 7z and RAR, displays download progress, and supports cancellation. Existing mods are not overwritten. Downloads are limited to 512 MiB and extraction to 2 GiB / 20,000 entries. The flow was informed by [SimpleModDownloader](https://github.com/PoloNX/SimpleModDownloader).
+
+Each mod can contain `romfs` / `exefs` directly or use `atmosphere/contents/0100152000022000/`, `contents/0100152000022000/`, or `0100152000022000/`. IPS/pchtxt patches in `atmosphere/exefs_patches/<patchset>/` or `exefs_patches/<patchset>/` share that mod's toggle. A top-level `atmosphere` folder is loaded last with its own toggle.
+
+On iOS, swipe a mod for file inspection or deletion; long-press also opens its context menu. On macOS, use the context menu. Deletion requires confirmation. The shared top-level `atmosphere` folder is read-only here because it may contain other games' files.
+
+iOS supports RomFS-only mods; code patches require rebuilding on a Mac. On macOS, run Prepare after changing code patches, which must match the game's NSO build ID. ARM32 code, replacement ExeFS modules, Skyline NRO plugins, packed `exefs.nsp` / `romfs.bin`, and `.stub` removal are unsupported. Use mods compatible with your game update; a supported folder layout alone does not establish gameplay compatibility.
 
 ```
 mods/
@@ -90,6 +98,9 @@ mods/
   Faster Items/
     exefs/
       158C0C7399AABD7BF83795C2EF3484C7.ips
+  Course Mod/
+    atmosphere/contents/0100152000022000/romfs/
+      Course/Gu_FirstCircuit/course_model.szs
 ```
 
 ## Limitations

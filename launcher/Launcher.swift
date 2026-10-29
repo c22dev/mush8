@@ -57,47 +57,6 @@ func gameCodeReady(in folder: URL, patches: [String]) -> Bool {
     return made.trimmingCharacters(in: .whitespacesAndNewlines) == nxpatchStamps[key]?.trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-struct Mod: Identifiable {
-    let name: String
-    let romfs: Bool
-    let patches: [String]
-    let replacedModules: Bool
-    var id: String { name }
-
-    var summary: String {
-        var parts: [String] = []
-        if romfs { parts.append("replaces game files") }
-        if !patches.isEmpty { parts.append(patches.count == 1 ? "1 code patch" : "\(patches.count) code patches") }
-        if replacedModules { parts.append("replaced code modules are not supported") }
-        return parts.isEmpty ? "no code patches in exefs" : parts.joined(separator: ", ")
-    }
-}
-
-func caselessChild(_ dir: URL, _ name: String) -> URL? {
-    let fm = FileManager.default
-    var isDir: ObjCBool = false
-    return (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil))?.first {
-        $0.lastPathComponent.caseInsensitiveCompare(name) == .orderedSame && fm.fileExists(atPath: $0.path, isDirectory: &isDir) && isDir.boolValue
-    }
-}
-
-func installedMods(in folder: URL) -> [Mod] {
-    let root = folder.appendingPathComponent("mods")
-    guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles) else { return [] }
-    return dirs.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        .compactMap { dir -> Mod? in
-            let romfs = caselessChild(dir, "romfs")
-            let exefs = caselessChild(dir, "exefs")
-            guard romfs != nil || exefs != nil else { return nil }
-            let files = exefs.flatMap { try? FileManager.default.contentsOfDirectory(atPath: $0.path) }?.filter { !$0.hasPrefix(".") }.sorted() ?? []
-            let patches = files.filter { ["ips", "pchtxt"].contains(($0 as NSString).pathExtension.lowercased()) }
-            let name = dir.lastPathComponent
-            return Mod(name: name, romfs: romfs != nil, patches: patches.map { "mods/\(name)/\(exefs!.lastPathComponent)/\($0)" },
-                       replacedModules: files.contains { ["main", "sdk", "rtld"].contains($0) || $0.hasPrefix("subsdk") })
-        }
-}
-
 func updateSource(_ s: Settings) -> String {
     let url = s.folderURL.appendingPathComponent(s.update).resolvingSymlinksInPath()
     let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
@@ -177,7 +136,7 @@ final class Settings: ObservableObject {
 
     var folderURL: URL { URL(fileURLWithPath: folder) }
 
-    var enabledMods: [Mod] { installedMods(in: folderURL).filter { !disabledMods.contains($0.name) } }
+    var enabledMods: [Mod] { installedMods(in: folderURL).filter { !disabledMods.contains($0.id) } }
 
     var codePatches: [String] { enabledMods.flatMap(\.patches) }
 
@@ -229,7 +188,7 @@ final class Settings: ObservableObject {
     var arguments: [String] {
         var a = ["--keys", keys, "--base", base, "--update", update]
         if FileManager.default.fileExists(atPath: folderURL.appendingPathComponent(dlc).path) { a += ["--dlc", dlc] }
-        for m in enabledMods where m.romfs { a += ["--mod", "mods/\(m.name)"] }
+        for m in enabledMods { a += ["--mod", m.path] }
         return a
     }
 }
@@ -248,7 +207,7 @@ func checks(_ s: Settings) -> [Check] {
     let shaderIndex = f.appendingPathComponent("work/shader_cache.noindex/heap-segments-v2/index.tsv").path
     let shaders = (try? fm.attributesOfItem(atPath: shaderIndex)[.size] as? Int) ?? nil
     let mods = installedMods(in: f)
-    let on = mods.filter { !s.disabledMods.contains($0.name) }.count
+    let on = mods.filter { !s.disabledMods.contains($0.id) }.count
     return [
         Check(id: "Base Game", ok: has(s.base), detail: has(s.base) ? s.base : "not found"),
         Check(id: "Update", ok: has(s.update), detail: has(s.update) ? s.update : "not found"),
@@ -434,6 +393,7 @@ struct LauncherView: View {
     @State private var showMods = false
 
     var body: some View {
+        let _ = tick
         let list = checks(s)
         let ready = list.allSatisfy { $0.ok || $0.optional }
         VStack(spacing: 16) {
@@ -467,7 +427,9 @@ struct LauncherView: View {
         }
         .padding(20)
         .frame(width: 520, height: 770)
-        .sheet(isPresented: $showMods) { ModsView(s: s) }
+        .sheet(isPresented: $showMods, onDismiss: { tick += 1 }) {
+            ModsView(s: s, onInstalled: { tick += 1 })
+        }
     }
 
     func dataSection(_ list: [Check]) -> some View {
@@ -485,7 +447,10 @@ struct LauncherView: View {
                     Text(c.id)
                     Spacer()
                     Text(c.detail).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    if c.id == "Mods" && c.ok { Button("Customize…") { showMods = true } }
+                    if c.id == "Mods" {
+                        Button("Customize…") { showMods = true }
+                            .disabled(s.folder.isEmpty || prep.running)
+                    }
                 }
             }
         }
@@ -682,26 +647,55 @@ struct LauncherView: View {
 
 struct ModsView: View {
     @ObservedObject var s: Settings
+    let onInstalled: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var mods: [Mod] = []
+    @State private var browsing = false
+    @State private var inspectedMod: Mod?
+    @State private var deletingMod: Mod?
+    @State private var actionError: String?
 
     var body: some View {
-        let mods = installedMods(in: s.folderURL)
         VStack(spacing: 12) {
             Form {
                 Section {
+                    if mods.isEmpty {
+                        Text("No mods installed. Browse GameBanana to add one.").foregroundStyle(.secondary)
+                    }
                     ForEach(mods) { m in
-                        Toggle(isOn: Binding(get: { !s.disabledMods.contains(m.name) }, set: { on in
-                            s.disabledMods.removeAll { $0 == m.name }
-                            if !on { s.disabledMods.append(m.name) }
+                        Toggle(isOn: Binding(get: { !s.disabledMods.contains(m.id) }, set: { on in
+                            s.disabledMods.removeAll { $0 == m.id }
+                            if !on { s.disabledMods.append(m.id) }
                         })) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(m.name)
+                                Text(m.displayTitle).font(.body.weight(.medium))
                                 Text(m.summary).font(.caption).foregroundStyle(.secondary)
                             }
                         }
+                        .accessibilityLabel(m.name)
+                        .accessibilityHint(m.summary + ". Open the context menu to view files or delete.")
+                        .accessibilityAction(named: Text("View files")) { inspectedMod = m }
+                        .contextMenu {
+                            Button("View files", systemImage: "folder") { inspectedMod = m }
+                            Button("Delete", systemImage: "trash", role: .destructive) { deletingMod = m }
+                                .disabled(!canDeleteMod(m))
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button { inspectedMod = m } label: { Label("Files", systemImage: "folder") }
+                                .tint(.blue)
+                            Button(role: .destructive) { deletingMod = m } label: { Label("Delete", systemImage: "trash") }
+                                .disabled(!canDeleteMod(m))
+                        }
                     }
                 } header: {
-                    Text("Mods")
+                    HStack {
+                        Text("Mods")
+                        if !mods.isEmpty {
+                            Spacer()
+                            Text("\(mods.filter { !s.disabledMods.contains($0.id) }.count)/\(mods.count) active")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 } footer: {
                     Text("Mods apply from top to bottom, so a lower mod wins when two mods change the same file. Code patches apply the next time you Prepare.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -710,12 +704,42 @@ struct ModsView: View {
             .formStyle(.grouped)
             HStack {
                 Button("Show in Finder") { NSWorkspace.shared.open(s.folderURL.appendingPathComponent("mods")) }
+                    .disabled(mods.isEmpty)
+                Button("Browse GameBanana…") { browsing = true }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(20)
-        .frame(width: 440, height: 420)
+        .frame(width: 540, height: 420)
+        .onAppear { mods = installedMods(in: s.folderURL) }
+        .sheet(item: $inspectedMod) { mod in ModContentsView(mod: mod, folder: s.folderURL) }
+        .confirmationDialog("Delete mod?", isPresented: Binding(get: { deletingMod != nil }, set: { if !$0 { deletingMod = nil } }), presenting: deletingMod) { mod in
+            Button("Delete", role: .destructive) { deleteMod(mod) }
+            Button("Cancel", role: .cancel) { deletingMod = nil }
+        } message: { mod in Text("Permanently delete \(mod.name)? Only \(mod.path) is removed.") }
+        .alert("Mod action failed", isPresented: Binding(get: { actionError != nil }, set: { if !$0 { actionError = nil } })) {
+            Button("OK") { actionError = nil }
+        } message: { Text(actionError ?? "") }
+        .sheet(isPresented: $browsing) {
+            ModBrowserView(folder: s.folderURL) { name in
+                s.disabledMods.removeAll { $0 == name }
+                s.save()
+                mods = installedMods(in: s.folderURL)
+                onInstalled()
+            }
+        }
+    }
+
+    func deleteMod(_ mod: Mod) {
+        deletingMod = nil
+        do {
+            try deleteInstalledMod(mod, in: s.folderURL)
+            s.disabledMods.removeAll { $0 == mod.id }
+            s.save()
+            mods = installedMods(in: s.folderURL)
+            onInstalled()
+        } catch { actionError = error.localizedDescription }
     }
 }
 

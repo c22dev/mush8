@@ -62,7 +62,11 @@ fn main() {
 }
 
 fn build_launcher() {
-    println!("cargo:rerun-if-changed=../../ios/Launcher.swift");
+    let sources = ["../../ios/Launcher.swift", "../../launcher/ModDiscovery.swift", "../../launcher/ModContents.swift", "../../launcher/GameBanana.swift", "../../launcher/ModInstaller.swift", "../../launcher/ModBrowser.swift"];
+    for source in sources {
+        println!("cargo:rerun-if-changed={source}");
+    }
+    println!("cargo:rerun-if-changed=../../launcher/Archive.h");
     let out = std::env::var("OUT_DIR").unwrap();
     let xcrun = |args: &[&str]| {
         let o = std::process::Command::new("xcrun").args(args).output().expect("xcrun");
@@ -73,7 +77,8 @@ fn build_launcher() {
     let status = std::process::Command::new(&swiftc)
         .args(["-parse-as-library", "-emit-library", "-static", "-O", "-module-name", "Mush8Launcher"])
         .args(["-target", "arm64-apple-ios26.0", "-sdk", &sdk])
-        .arg("../../ios/Launcher.swift")
+        .args(sources)
+        .args(["-import-objc-header", "../../launcher/Archive.h"])
         .arg("-o")
         .arg(format!("{out}/libmush8launcher.a"))
         .status()
@@ -81,6 +86,7 @@ fn build_launcher() {
     assert!(status.success(), "swiftc failed");
     println!("cargo:rustc-link-search=native={out}");
     println!("cargo:rustc-link-lib=static=mush8launcher");
+    println!("cargo:rustc-link-lib=archive");
     println!("cargo:rustc-link-search=native={sdk}/usr/lib/swift");
     let toolchain = Path::new(&swiftc).parent().unwrap().parent().unwrap().join("lib/swift/iphoneos");
     println!("cargo:rustc-link-search=native={}", toolchain.display());

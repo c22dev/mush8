@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const ARCHIVES: &[&str] = &["sarc", "szs", "bntx", "msbt"];
+const TITLE_ID: &str = "0100152000022000";
 
 enum Node {
     File(PathBuf),
@@ -37,8 +38,80 @@ fn entries(dir: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
+fn root(dir: &Path) -> Result<PathBuf> {
+    let files = entries(dir)?;
+    if let Some(name) = dir.file_name().and_then(|n| n.to_str()) {
+        if name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit()) && !name.eq_ignore_ascii_case(TITLE_ID) {
+            bail!("{}: this title is not Mario Kart 8 Deluxe ({TITLE_ID})", dir.display());
+        }
+    }
+    let atmosphere = child(dir, "atmosphere");
+    let mut candidates = vec![dir.to_path_buf()];
+    if let Some(title) = atmosphere.as_ref().and_then(|p| child(p, "contents")).and_then(|p| child(&p, TITLE_ID)) {
+        candidates.push(title);
+    }
+    if let Some(title) = child(dir, "contents").and_then(|p| child(&p, TITLE_ID)) {
+        candidates.push(title);
+    }
+    if let Some(title) = child(dir, TITLE_ID) {
+        candidates.push(title);
+    }
+    for candidate in candidates {
+        if child(&candidate, "romfs").is_some() || child(&candidate, "exefs").is_some()
+            || entries(&candidate)?.iter().any(|(n, _)| n.eq_ignore_ascii_case("exefs.nsp") || n.eq_ignore_ascii_case("romfs.bin") || n.to_ascii_lowercase().ends_with(".stub")) {
+            return Ok(candidate);
+        }
+    }
+    if files.iter().any(|(n, p)| n.eq_ignore_ascii_case("exefs_patches") && p.is_dir())
+        || atmosphere.as_ref().and_then(|p| child(p, "exefs_patches")).is_some() {
+        return Ok(dir.to_path_buf());
+    }
+    bail!("{}: no RomFS/ExeFS mod for Mario Kart 8 Deluxe ({TITLE_ID}), or exefs_patches directory", dir.display())
+}
+
+fn validate(mods: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let roots = mods.iter().map(|p| root(p)).collect::<Result<Vec<_>>>()?;
+    for dir in &roots {
+        for (name, path) in entries(dir)? {
+            if name.to_ascii_lowercase().ends_with(".stub") {
+                bail!("{}: Atmosphere .stub file removal is not supported", path.display());
+            }
+            if name.eq_ignore_ascii_case("exefs.nsp") || name.eq_ignore_ascii_case("romfs.bin") {
+                bail!("{}: packed mod files are not supported; extract this file to an exefs or romfs directory", path.display());
+            }
+        }
+        if let Some(exefs) = child(dir, "exefs") {
+            let files = entries(&exefs)?;
+            if let Some((_, path)) = files.iter().find(|(n, _)| n.eq_ignore_ascii_case("main.npdm")) {
+                let data = std::fs::read(path).with_context(|| path.display().to_string())?;
+                anyhow::ensure!(data.len() >= 0x20 && &data[..4] == b"META" && data[0xC] & 1 != 0, "{}: invalid or ARM32 main.npdm; Mush8 requires AArch64", path.display());
+            }
+            for (name, path) in files {
+                let lower = name.to_ascii_lowercase();
+                if lower.ends_with(".stub") {
+                    bail!("{}: Atmosphere .stub file removal is not supported", path.display());
+                }
+                if lower == "main" || lower == "sdk" || lower == "rtld" || (lower.starts_with("subsdk") && path.extension().is_none()) {
+                    bail!("{}: native ExeFS modules are not supported; this mod needs code execution, not just a RomFS overlay", path.display());
+                }
+            }
+        }
+        if let Some(plugins) = child(dir, "romfs").and_then(|p| child(&p, "skyline")).and_then(|p| child(&p, "plugins")) {
+            for (name, path) in entries(&plugins)? {
+                if name.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("nro")) {
+                    bail!("{}: Skyline NRO plugins are not supported; loading only this mod's RomFS would leave its code inactive", path.display());
+                }
+            }
+        }
+    }
+    Ok(roots)
+}
+
 fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, Node)>) -> Result<()> {
     for (name, path) in entries(dir)? {
+        if name.to_ascii_lowercase().ends_with(".stub") {
+            bail!("{}: Atmosphere .stub file removal is not supported", path.display());
+        }
         let key = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
         if path.is_dir() && is_archive(&name) {
             out.push((key, Node::Archive(archive(&path)?)));
@@ -125,9 +198,10 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
 }
 
 pub fn romfs(romfs: DynStorage, mods: &[PathBuf]) -> Result<DynStorage> {
+    let roots = validate(mods)?;
     let mut changes: HashMap<String, (String, Vec<Change>)> = HashMap::new();
     let names: Vec<String> = mods.iter().map(|m| m.file_name().map_or_else(|| m.display().to_string(), |n| n.to_string_lossy().into_owned())).collect();
-    for (m, name) in mods.iter().zip(&names) {
+    for (m, name) in roots.iter().zip(&names) {
         let Some(dir) = child(m, "romfs") else { continue };
         let mut found = Vec::new();
         walk(&dir, "", &mut found)?;

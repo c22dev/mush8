@@ -52,6 +52,7 @@ struct Npdm {
 fn read_npdm(path: &PathBuf) -> Result<Npdm> {
     let b = std::fs::read(path).with_context(|| path.display().to_string())?;
     anyhow::ensure!(b.len() >= 0x20 && &b[..4] == b"META", "not an NPDM");
+    anyhow::ensure!(b[0xC] & 1 != 0, "32-bit ARM (AArch32) code is not supported; Mush8 requires AArch64");
     Ok(Npdm { priority: b[0xE], core: b[0xF], stack_size: u32::from_le_bytes(b[0x1C..0x20].try_into()?) })
 }
 
@@ -153,9 +154,10 @@ fn main() {
         unsafe { std::env::set_var(k, v) };
     }
     eprintln!("[host] iOS: files in {}, bundle {}", docs.display(), bundle.display());
-    let args = Args::parse_from(["nxhost", "--patched", &bundle.join("modules").display().to_string(), "--npdm", &bundle.join("modules/main.npdm").display().to_string()]);
+    let mut args = Args::parse_from(["nxhost", "--patched", &bundle.join("modules").display().to_string(), "--npdm", &bundle.join("modules/main.npdm").display().to_string()]);
     gfx::run_app(move || {
         apply_launcher_settings();
+        args.mods = ios_mods();
         let missing: Vec<&str> = ["prod.keys", "base.nsp", "update.nsp"].into_iter().filter(|f| !update_file(std::path::Path::new(f)).exists()).collect();
         anyhow::ensure!(
             missing.is_empty(),
@@ -164,6 +166,21 @@ fn main() {
         );
         start(args)
     })
+}
+
+#[cfg(target_os = "ios")]
+fn ios_mods() -> Vec<PathBuf> {
+    use std::ffi::{CStr, c_char, c_void};
+    unsafe extern "C" {
+        fn mush8_each_mod(context: *mut c_void, callback: extern "C" fn(*mut c_void, *const c_char));
+    }
+    extern "C" fn collect(context: *mut c_void, path: *const c_char) {
+        let mods = unsafe { &mut *context.cast::<Vec<PathBuf>>() };
+        mods.push(PathBuf::from(unsafe { CStr::from_ptr(path) }.to_string_lossy().as_ref()));
+    }
+    let mut mods = Vec::new();
+    unsafe { mush8_each_mod((&mut mods as *mut Vec<PathBuf>).cast(), collect) };
+    mods
 }
 
 #[cfg(target_os = "ios")]

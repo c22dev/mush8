@@ -58,6 +58,7 @@ final class Settings: ObservableObject {
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
+    @Published var disabledMods: [String] = []
     var extra: [String: Any] = [:]
     private var autosave: AnyCancellable?
 
@@ -82,6 +83,7 @@ final class Settings: ObservableObject {
         fillScreen = json["aspect"] as? String != "16:9"
         hudAtEdges = json["hud"] as? String != "center"
         hudScale = json["hud_scale"] as? Double ?? 1.0
+        disabledMods = json["disabled_mods"] as? [String] ?? []
     }
 
     func save() throws {
@@ -103,6 +105,7 @@ final class Settings: ObservableObject {
         json["aspect"] = fillScreen ? "fill" : "16:9"
         json["hud"] = hudAtEdges ? "edges" : "center"
         json["hud_scale"] = hudScale
+        json["disabled_mods"] = disabledMods
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
     }
@@ -243,6 +246,11 @@ struct LauncherView: View {
     @StateObject private var network = LocalNetwork()
     @State private var error: String?
     @State private var picking = false
+    @State private var browsingMods = false
+    @State private var inspectedMod: Mod?
+    @State private var deletingMod: Mod?
+    @State private var modActionError: String?
+    @State private var mods: [Mod] = []
     @State private var memory = os_proc_available_memory()
     @Environment(\.scenePhase) private var phase
     let play: () -> Void
@@ -269,6 +277,7 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
             Form {
                 if !files.ready { gameFilesSection }
+                modsSection
                 Section {
                     Picker("Mode", selection: $s.network) {
                         Text("Off").tag("off")
@@ -374,19 +383,115 @@ struct LauncherView: View {
         .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .folder], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { files.copy(urls) }
         }
+        .fullScreenCover(isPresented: $browsingMods, onDismiss: { mods = installedMods(in: docsURL) }) {
+            ModBrowserView(folder: docsURL) { name in
+                s.disabledMods.removeAll { $0 == name }
+                do { try s.save() } catch { self.error = "Could not save settings: \(error.localizedDescription)" }
+                mods = installedMods(in: docsURL)
+            }
+        }
+        .sheet(item: $inspectedMod) { mod in
+            ModContentsView(mod: mod, folder: docsURL)
+        }
+        .confirmationDialog("Delete mod?", isPresented: Binding(get: { deletingMod != nil }, set: { if !$0 { deletingMod = nil } }), presenting: deletingMod) { mod in
+            Button("Delete", role: .destructive) { deleteMod(mod) }
+            Button("Cancel", role: .cancel) { deletingMod = nil }
+        } message: { mod in
+            Text("Permanently delete \(mod.name)? Only \(mod.path) is removed.")
+        }
+        .alert("Mod action failed", isPresented: Binding(get: { modActionError != nil }, set: { if !$0 { modActionError = nil } })) {
+            Button("OK") { modActionError = nil }
+        } message: { Text(modActionError ?? "") }
         .onAppear {
             files.scan()
+            mods = installedMods(in: docsURL)
             if usesLocalNetwork { network.request() }
         }
         .onChange(of: s.network) { if usesLocalNetwork { network.request() } }
         .onChange(of: s.phonePads) { if usesLocalNetwork { network.request() } }
-        .onChange(of: phase) { _, p in if p == .active { files.scan() } }
+        .onChange(of: phase) { _, p in
+            if p == .active {
+                files.scan()
+                mods = installedMods(in: docsURL)
+            }
+        }
         .task {
             while !Task.isCancelled {
                 memory = os_proc_available_memory()
                 try? await Task.sleep(for: .seconds(2))
             }
         }
+    }
+
+    var modsSection: some View {
+        Section {
+            Button {
+                browsingMods = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "globe")
+                    Text("Browse GameBanana…").fontWeight(.medium)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+            }
+            .disabled(files.copying != nil)
+            if mods.isEmpty {
+                Text("No mods installed.").foregroundStyle(.secondary)
+            }
+            ForEach(mods) { mod in
+                Toggle(isOn: Binding(get: { !s.disabledMods.contains(mod.id) }, set: { enabled in
+                    s.disabledMods.removeAll { $0 == mod.id }
+                    if !enabled { s.disabledMods.append(mod.id) }
+                })) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(mod.displayTitle).font(.body.weight(.medium)).lineLimit(2)
+                        Text(mod.summary).font(.caption).foregroundStyle(.secondary)
+                        if !canDeleteMod(mod) {
+                            Text("Shared folder · view files only").font(.caption).foregroundStyle(.secondary)
+                        }
+                        if !mod.patches.isEmpty {
+                            Text("Rebuild required on iOS").font(.caption).foregroundStyle(.orange)
+                        }
+                    }
+                }
+                .accessibilityLabel(mod.name)
+                .accessibilityHint(mod.summary + ". Swipe or long press for actions.")
+                .accessibilityAction(named: Text("View files")) { inspectedMod = mod }
+                .contextMenu {
+                    Button("View files", systemImage: "folder") { inspectedMod = mod }
+                    Button("Delete", systemImage: "trash", role: .destructive) { deletingMod = mod }
+                        .disabled(!canDeleteMod(mod))
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    Button { inspectedMod = mod } label: { Label("Files", systemImage: "folder") }
+                        .tint(.blue)
+                    Button(role: .destructive) { deletingMod = mod } label: { Label("Delete", systemImage: "trash") }
+                        .disabled(!canDeleteMod(mod))
+                }
+            }
+        } header: {
+            HStack {
+                Text("Mods")
+                if !mods.isEmpty {
+                    Spacer()
+                    Text("\(mods.filter { !s.disabledMods.contains($0.id) }.count)/\(mods.count) active")
+                        .font(.caption).foregroundStyle(.secondary).textCase(nil)
+                }
+            }
+        } footer: {
+            Text("Swipe to delete; long press for files. Lower mods win conflicts. RomFS loads on Play; code patches need an iOS rebuild.")
+        }
+    }
+
+    func deleteMod(_ mod: Mod) {
+        deletingMod = nil
+        do {
+            try deleteInstalledMod(mod, in: docsURL)
+            s.disabledMods.removeAll { $0 == mod.id }
+            mods = installedMods(in: docsURL)
+            try s.save()
+        } catch { modActionError = error.localizedDescription }
     }
 
     var gameFilesSection: some View {
@@ -451,6 +556,10 @@ struct LauncherView: View {
     var usesLocalNetwork: Bool { s.network == "lan" || s.network == "wireless" || s.phonePads }
 
     func start() {
+        if let mod = installedMods(in: docsURL).first(where: { !s.disabledMods.contains($0.id) && !$0.patches.isEmpty }) {
+            error = "\(mod.name) has code patches. Turn it off or rebuild the iOS app with those patches before playing."
+            return
+        }
         if s.network == "lanplay" && s.lanPlayServer.trimmingCharacters(in: .whitespaces).isEmpty {
             error = "Enter a LAN-Play server (host:port)"
             return
@@ -482,4 +591,13 @@ public func mush8ShowLauncher(_ viewController: UnsafeMutableRawPointer, _ play:
     door.host = host
     host.modalPresentationStyle = .fullScreen
     parent.present(host, animated: false)
+}
+
+@_cdecl("mush8_each_mod")
+public func mush8EachMod(_ context: UnsafeMutableRawPointer, _ callback: @convention(c) (UnsafeMutableRawPointer, UnsafePointer<CChar>) -> Void) {
+    let json = (try? Data(contentsOf: configURL)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+    let disabled = json?["disabled_mods"] as? [String] ?? []
+    for mod in installedMods(in: docsURL) where !disabled.contains(mod.id) {
+        docsURL.appendingPathComponent(mod.path).path.withCString { callback(context, $0) }
+    }
 }
