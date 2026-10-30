@@ -197,7 +197,17 @@ vertex V vs(uint id [[vertex_id]], constant P& p [[buffer(0)]]) {
     return v;
 }
 fragment float4 fs(V v [[stage_in]], constant P& p [[buffer(0)]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {
-    return float4(t.sample(s, clamp(v.uv, p.lo, p.hi)).rgb, 1.0);
+    float2 size = float2(t.get_width(), t.get_height());
+    float2 foot = max(abs(dfdx(v.uv)), abs(dfdy(v.uv))) * size;
+    int2 n = clamp(int2(ceil(foot * 0.5)), 1, 4);
+    float3 c = 0.0;
+    for (int y = 0; y < n.y; y++) {
+        for (int x = 0; x < n.x; x++) {
+            float2 o = ((float2(x, y) + 0.5) / float2(n) - 0.5) * foot / size;
+            c += t.sample(s, clamp(v.uv + o, p.lo, p.hi)).rgb;
+        }
+    }
+    return float4(c / float(n.x * n.y), 1.0);
 }
 "#;
 

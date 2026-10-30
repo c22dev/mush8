@@ -64,7 +64,7 @@ pub struct Textures {
     views: FastMap<(TexKey, TexKind, [u32; 4]), Shared<Texture>>,
     dummies: FastMap<(TexKind, u8), Shared<Texture>>,
     mismatches: FastMap<(TexKind, u64), ()>,
-    samplers: FastMap<[u8; 0x40], Shared<Sampler>>,
+    samplers: FastMap<([u8; 0x40], bool), Shared<Sampler>>,
     default_sampler: Option<Shared<Sampler>>,
     misses: u64,
     uploaded: FastMap<TexKey, ([u64; WINDOWS], u64, u64)>,
@@ -330,13 +330,14 @@ impl Textures {
             .clone()
     }
 
-    pub fn sampler(&mut self, b: Option<&[u8; 0x60]>) -> Shared<Sampler> {
+    pub fn sampler(&mut self, b: Option<&[u8; 0x60]>, tex: &Texture) -> Shared<Sampler> {
         let Some(b) = b else {
-            return self.default_sampler.get_or_insert_with(|| Shared(make_sampler(None))).clone();
+            return self.default_sampler.get_or_insert_with(|| Shared(make_sampler(None, false))).clone();
         };
         let mut key = [0u8; 0x40];
         key.copy_from_slice(&b[8..0x48]);
-        self.samplers.entry(key).or_insert_with(|| Shared(make_sampler(Some(b)))).clone()
+        let enhance = ENHANCE.on && tex.mipmapLevelCount() > 1 && !tex.usage().contains(MTLTextureUsage::RenderTarget);
+        self.samplers.entry((key, enhance)).or_insert_with(|| Shared(make_sampler(Some(b), enhance))).clone()
     }
 }
 
@@ -520,12 +521,52 @@ pub fn compare_fn(nvn: u32) -> MTLCompareFunction {
     }
 }
 
-fn make_sampler(b: Option<&[u8; 0x60]>) -> objc2::rc::Retained<Sampler> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MipBlend {
+    Game,
+    Bilinear,
+    Trilinear,
+}
+
+struct Enhance {
+    on: bool,
+    aniso: usize,
+    lod_bias: f32,
+    mips: MipBlend,
+}
+
+const PLAIN: Enhance = Enhance { on: false, aniso: 0, lod_bias: 0.0, mips: MipBlend::Game };
+
+static ENHANCE: std::sync::LazyLock<Enhance> = std::sync::LazyLock::new(|| {
+    let mut e = Enhance {
+        on: false,
+        aniso: std::env::var("NX_ANISO").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(16),
+        lod_bias: std::env::var("NX_LOD_BIAS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|b| b.is_finite()).unwrap_or(0.0).clamp(-4.0, 4.0),
+        mips: match std::env::var("NX_TEXTURE_FILTER").as_deref() {
+            Ok("bilinear") => MipBlend::Bilinear,
+            Ok("trilinear") => MipBlend::Trilinear,
+            _ => MipBlend::Game,
+        },
+    };
+    e.on = e.aniso > 1 || e.lod_bias != 0.0 || e.mips != MipBlend::Game;
+    if e.on {
+        eprintln!("[gfx] samplers: anisotropy {}x, LOD bias {:+}, mip filter {:?}", e.aniso.max(1), e.lod_bias, e.mips);
+    }
+    e
+});
+
+fn make_sampler(b: Option<&[u8; 0x60]>, enhance: bool) -> objc2::rc::Retained<Sampler> {
     let d = MTLSamplerDescriptor::new();
     if let Some(b) = b {
         let min = u32_at(b, 8);
-        d.setMinFilter(if matches!(min, 1 | 3 | 5) { MTLSamplerMinMagFilter::Linear } else { MTLSamplerMinMagFilter::Nearest });
+        let linear = matches!(min, 1 | 3 | 5);
+        let mipmapped = matches!(min, 2..=5);
+        let compare = u32_at(b, 0x28) == 1;
+        let fx = if enhance { &*ENHANCE } else { &PLAIN };
+        d.setMinFilter(if linear { MTLSamplerMinMagFilter::Linear } else { MTLSamplerMinMagFilter::Nearest });
         d.setMipFilter(match min {
+            3 if fx.mips == MipBlend::Trilinear => MTLSamplerMipFilter::Linear,
+            5 if fx.mips == MipBlend::Bilinear => MTLSamplerMipFilter::Nearest,
             2 | 3 => MTLSamplerMipFilter::Nearest,
             4 | 5 => MTLSamplerMipFilter::Linear,
             _ => MTLSamplerMipFilter::NotMipmapped,
@@ -546,7 +587,7 @@ fn make_sampler(b: Option<&[u8; 0x60]>) -> objc2::rc::Retained<Sampler> {
             d.setLodMinClamp(lo.max(0.0));
             d.setLodMaxClamp(hi);
         }
-        d.setCompareFunction(if u32_at(b, 0x28) == 1 { compare_fn(u32_at(b, 0x2c)) } else { MTLCompareFunction::LessEqual });
+        d.setCompareFunction(if compare { compare_fn(u32_at(b, 0x2c)) } else { MTLCompareFunction::LessEqual });
         let border = [f32_at(b, 0x30), f32_at(b, 0x34), f32_at(b, 0x38), f32_at(b, 0x3c)];
         d.setBorderColor(if border == [1.0; 4] {
             MTLSamplerBorderColor::OpaqueWhite
@@ -555,14 +596,22 @@ fn make_sampler(b: Option<&[u8; 0x60]>) -> objc2::rc::Retained<Sampler> {
         } else {
             MTLSamplerBorderColor::TransparentBlack
         });
-        let bias = f32_at(b, 0x24);
-        if bias.is_finite() && bias != 0.0 && objc2::runtime::NSObjectProtocol::respondsToSelector(&*d, objc2::sel!(setLodBias:)) {
+        let mut bias = f32_at(b, 0x24);
+        if !bias.is_finite() {
+            bias = 0.0;
+        }
+        if mipmapped {
+            bias += fx.lod_bias;
+        }
+        if bias != 0.0 && objc2::runtime::NSObjectProtocol::respondsToSelector(&*d, objc2::sel!(setLodBias:)) {
             d.setLodBias(bias.clamp(-16.0, 15.99));
         }
         let aniso = f32_at(b, 0x40);
-        if aniso.is_finite() {
-            d.setMaxAnisotropy((aniso as usize).clamp(1, 16));
+        let mut aniso = if aniso.is_finite() { (aniso as usize).clamp(1, 16) } else { 1 };
+        if mipmapped && linear && !compare {
+            aniso = aniso.max(fx.aniso);
         }
+        d.setMaxAnisotropy(aniso);
     } else {
         d.setMinFilter(MTLSamplerMinMagFilter::Linear);
         d.setMagFilter(MTLSamplerMinMagFilter::Linear);

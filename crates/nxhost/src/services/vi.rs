@@ -23,29 +23,37 @@ pub fn docked() -> bool {
     *D
 }
 
-pub const UHD_HEAP: u64 = 0xFFE0_0000;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Output {
+    Handheld,
+    Full,
+    Uhd,
+}
 
-pub fn uhd() -> bool {
-    static U: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-        if !docked() || !std::env::var("NX_4K").is_ok_and(|v| v == "1") {
-            return false;
+pub const UHD_HEAP: u64 = 0xFFE0_0000;
+pub fn output() -> Output {
+    static O: std::sync::LazyLock<Output> = std::sync::LazyLock::new(|| {
+        if !docked() {
+            return Output::Handheld;
         }
-        let fits = crate::kernel::aspace().layout.heap_size >= UHD_HEAP && crate::gfx::max_buffer_len() >= UHD_HEAP;
-        if !fits {
-            eprintln!("[vi] 4K needs a {UHD_HEAP:#x}-byte guest heap the GPU can map: staying at 1080p");
+        if !std::env::var("NX_4K").is_ok_and(|v| v == "1") {
+            return Output::Full;
         }
-        fits
+        let heap = crate::kernel::aspace().layout.heap_size.min(crate::gfx::max_buffer_len());
+        if heap >= UHD_HEAP {
+            return Output::Uhd;
+        }
+        eprintln!("[vi] 4K needs a {UHD_HEAP:#x}-byte guest heap the GPU can map, this Mac allows {heap:#x}");
+        Output::Full
     });
-    *U
+    *O
 }
 
 pub fn resolution() -> (u32, u32) {
-    if uhd() {
-        (3840, 2160)
-    } else if docked() {
-        (1920, 1080)
-    } else {
-        (1280, 720)
+    match output() {
+        Output::Uhd => (3840, 2160),
+        Output::Full => (1920, 1080),
+        Output::Handheld => (1280, 720),
     }
 }
 

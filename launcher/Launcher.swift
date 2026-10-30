@@ -96,10 +96,14 @@ final class Settings: ObservableObject {
     @Published var browserPads = false
     @Published var handheld = false
     @Published var uhd = false
+    @Published var dynamicResolution = true
     @Published var split60 = true
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
+    @Published var anisotropy = 0
+    @Published var lodBias = 0.0
+    @Published var textureFilter = "game"
     @Published var disabledMods: [String] = []
     private var autosave: AnyCancellable?
 
@@ -131,10 +135,14 @@ final class Settings: ObservableObject {
         browserPads = j["browser_pads"] as? Bool ?? false
         handheld = j["handheld"] as? Bool ?? false
         uhd = j["uhd"] as? Bool ?? false
+        dynamicResolution = j["dynamic_resolution"] as? Bool ?? true
         split60 = j["split60"] as? Bool ?? true
         fillScreen = j["aspect"] as? String != "16:9"
         hudAtEdges = j["hud"] as? String != "center"
         hudScale = j["hud_scale"] as? Double ?? 1.0
+        anisotropy = j["anisotropy"] as? Int ?? 0
+        lodBias = j["lod_bias"] as? Double ?? 0.0
+        textureFilter = j["texture_filter"] as? String ?? (j["trilinear"] as? Bool == true ? "trilinear" : "game")
         disabledMods = j["disabled_mods"] as? [String] ?? []
     }
 
@@ -148,8 +156,9 @@ final class Settings: ObservableObject {
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
             "nextendo_pid": NSNumber(value: nextendoPid), "nextendo_name": nextendoName,
             "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
-            "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
+            "handheld": handheld, "uhd": uhd, "dynamic_resolution": dynamicResolution, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
+            "anisotropy": anisotropy, "lod_bias": lodBias, "texture_filter": textureFilter,
             "disabled_mods": disabledMods,
         ]
         try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
@@ -188,6 +197,10 @@ final class Settings: ObservableObject {
         if fillScreen { env["NX_ASPECT"] = "auto" }
         if !hudAtEdges { env["NX_HUD"] = "center" }
         if hudScale != 1 { env["NX_HUD_SCALE"] = String(hudScale) }
+        if !dynamicResolution { env["NX_DYNRES"] = "0" }
+        if anisotropy > 1 { env["NX_ANISO"] = String(anisotropy) }
+        if lodBias != 0 { env["NX_LOD_BIAS"] = String(lodBias) }
+        if textureFilter != "game" { env["NX_TEXTURE_FILTER"] = textureFilter }
         return env
     }
 
@@ -541,8 +554,8 @@ struct LauncherView: View {
         }
         Section {
             Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1 })) {
-                Text("Docked (1080p)").tag(0)
                 Text("Docked (4K)").tag(1)
+                Text("Docked (1080p)").tag(0)
                 Text("Handheld (720p)").tag(2)
             }
             Toggle(isOn: $s.split60) { labeled("60 fps split screen", "3 or 4 players get every screen drawn each frame, needs a fast GPU") }
@@ -560,6 +573,27 @@ struct LauncherView: View {
                 Text("HUD size")
                 Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
                 Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
+            }
+            Toggle(isOn: $s.dynamicResolution) {
+                labeled("Dynamic resolution", "The game lowers its resolution in races when the GPU is busy. Turn it off to always render at full size (update 4.0.1 only)")
+            }
+            Picker(selection: $s.anisotropy) {
+                Text("Game default").tag(0)
+                ForEach([2, 4, 8, 16], id: \.self) { n in Text("\(n)x").tag(n) }
+            } label: {
+                labeled("Anisotropic filtering", "Keeps textures sharp on surfaces seen at an angle, such as the road ahead")
+            }
+            Picker(selection: $s.textureFilter) {
+                Text("Game default").tag("game")
+                Text("Bilinear").tag("bilinear")
+                Text("Trilinear").tag("trilinear")
+            } label: {
+                labeled("Texture filtering", "Trilinear blends between texture detail levels. Bilinear switches between them, a little faster but with visible lines")
+            }
+            HStack {
+                labeled("Texture LOD bias", "Below 0 shows sharper textures in the distance, above 0 blurs them")
+                Slider(value: $s.lodBias, in: -2...2, step: 0.25)
+                Text(s.lodBias == 0 ? "0" : String(format: "%+.2f", s.lodBias)).monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
             }
         } header: {
             Text("Graphics")

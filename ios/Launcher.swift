@@ -60,6 +60,10 @@ final class Settings: ObservableObject {
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
+    @Published var anisotropy = 0
+    @Published var lodBias = 0.0
+    @Published var textureFilter = "game"
+    @Published var dynamicResolution = true
     @Published var disabledMods: [String] = []
     var extra: [String: Any] = [:]
     private var autosave: AnyCancellable?
@@ -87,6 +91,10 @@ final class Settings: ObservableObject {
         fillScreen = json["aspect"] as? String != "16:9"
         hudAtEdges = json["hud"] as? String != "center"
         hudScale = json["hud_scale"] as? Double ?? 1.0
+        anisotropy = json["anisotropy"] as? Int ?? 0
+        lodBias = json["lod_bias"] as? Double ?? 0.0
+        textureFilter = json["texture_filter"] as? String ?? (json["trilinear"] as? Bool == true ? "trilinear" : "game")
+        dynamicResolution = json["dynamic_resolution"] as? Bool ?? true
         disabledMods = json["disabled_mods"] as? [String] ?? []
     }
 
@@ -112,6 +120,11 @@ final class Settings: ObservableObject {
         json["aspect"] = fillScreen ? "fill" : "16:9"
         json["hud"] = hudAtEdges ? "edges" : "center"
         json["hud_scale"] = hudScale
+        json["anisotropy"] = anisotropy
+        json["lod_bias"] = lodBias
+        json["texture_filter"] = textureFilter
+        json["trilinear"] = nil
+        json["dynamic_resolution"] = dynamicResolution
         json["disabled_mods"] = disabledMods
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
@@ -347,14 +360,31 @@ struct LauncherView: View {
                         Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
                         Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
                     }
+                    Toggle("Dynamic resolution", isOn: $s.dynamicResolution)
+                    Picker("Anisotropic filtering", selection: $s.anisotropy) {
+                        Text("Game default").tag(0)
+                        ForEach([2, 4, 8, 16], id: \.self) { n in Text("\(n)x").tag(n) }
+                    }
+                    Picker("Texture filtering", selection: $s.textureFilter) {
+                        Text("Game default").tag("game")
+                        Text("Bilinear").tag("bilinear")
+                        Text("Trilinear").tag("trilinear")
+                    }
+                    HStack {
+                        Text("Texture LOD bias")
+                        Slider(value: $s.lodBias, in: -2...2, step: 0.25)
+                        Text(s.lodBias == 0 ? "0" : String(format: "%+.2f", s.lodBias)).monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                    }
                 } header: {
                     Text("Graphics")
                 } footer: {
-                    Text("Handheld renders at 720p: lighter on the GPU and battery. Fill screen widens the race to the whole display")
+                    Text("Handheld renders at 720p: lighter on the GPU and battery. Fill screen widens the race to the whole display. Dynamic resolution lowers the resolution in races when the GPU is busy. Anisotropic filtering keeps textures sharp at an angle. Trilinear texture filtering blends texture detail levels, bilinear is a little faster. An LOD bias below 0 shows sharper textures in the distance")
                 }
                 Section {
                     Toggle("Prewarm pipelines", isOn: $s.prewarm)
                     Toggle("Background shader compiling", isOn: $s.backgroundCompile)
+                } header: {
+                    Text("Shaders")
                 } footer: {
                     Text("Builds the game's graphics pipelines in the background at startup")
                 }
