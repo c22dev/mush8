@@ -92,6 +92,7 @@ final class Settings: ObservableObject {
     @Published var motion = false
     @Published var phonePads = true
     @Published var browserPads = false
+    @Published var autoDisableKeyboard = true
     @Published var handheld = false
     @Published var uhd = false
     @Published var split60 = true
@@ -125,6 +126,7 @@ final class Settings: ObservableObject {
         motion = j["motion_controls"] as? Bool ?? false
         phonePads = j["phone_pads"] as? Bool ?? true
         browserPads = j["browser_pads"] as? Bool ?? false
+        autoDisableKeyboard = j["auto_disable_keyboard"] as? Bool ?? true
         handheld = j["handheld"] as? Bool ?? false
         uhd = j["uhd"] as? Bool ?? false
         split60 = j["split60"] as? Bool ?? true
@@ -145,7 +147,7 @@ final class Settings: ObservableObject {
             "folder": folder, "keys": keys, "base": base, "update": update, "dlc": dlc, "network": network,
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
             "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
-            "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
+            "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads, "auto_disable_keyboard": autoDisableKeyboard,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
             "disabled_mods": disabledMods,
         ]
@@ -177,6 +179,7 @@ final class Settings: ObservableObject {
         env["NX_MOTION"] = motion ? "1" : "0"
         env["NX_PHONE_PADS"] = phonePads ? "1" : "0"
         if phonePads && browserPads { env["NX_BROWSER_PADS"] = "1" }
+        if autoDisableKeyboard { env["NX_AUTO_DISABLE_KEYBOARD"] = "1" }
         if handheld { env["NX_HANDHELD"] = "1" } else if uhd { env["NX_4K"] = "1" }
         if split60 { env["NX_SPLIT60"] = "1" }
         if fillScreen { env["NX_ASPECT"] = "auto" }
@@ -500,6 +503,7 @@ struct LauncherView: View {
             Toggle("Remote controllers", isOn: $s.phonePads)
             if s.phonePads {
                 Toggle("Web controllers", isOn: $s.browserPads)
+                Toggle("Disable keyboard when remote connected", isOn: $s.autoDisableKeyboard)
                 if s.browserPads {
                     addressRow("Mac's address", phonePadHost)
                     addressRow("Or by IP", sys.lan.map { "http://\($0):2904" })
