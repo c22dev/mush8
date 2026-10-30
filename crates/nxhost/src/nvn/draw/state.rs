@@ -577,7 +577,8 @@ type Function = objc2::runtime::ProtocolObject<dyn MTLFunction>;
 
 const PIPELINE_LIST: &str = "data/pipelines.tsv";
 const USER_LIST: &str = "work/pipelines.tsv";
-const ARCHIVE_FILE: &str = "pipelines.metalar";
+// Metal loads an archive in time quadratic in its pipeline count (minutes for 8k), so the archive is split
+const ARCHIVE_CHUNK: usize = 256;
 
 static ARCHIVES: LazyLock<Option<Shared<NSArray<Archive>>>> = LazyLock::new(|| {
     if std::env::var_os("NX_PIPELINE_ARCHIVE").is_none() {
@@ -588,9 +589,10 @@ static ARCHIVES: LazyLock<Option<Shared<NSArray<Archive>>>> = LazyLock::new(|| {
         .ok()?
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.starts_with("pipelines") && n.ends_with(".metalar"))
+        .filter(|n| is_archive(n))
         .collect();
     files.sort();
+    let t0 = std::time::Instant::now();
     let archives: Vec<Retained<Archive>> = files
         .iter()
         .filter_map(|f| {
@@ -599,9 +601,13 @@ static ARCHIVES: LazyLock<Option<Shared<NSArray<Archive>>>> = LazyLock::new(|| {
             gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&d).ok()
         })
         .collect();
-    eprintln!("[gfx] {} pipeline archive(s) loaded", archives.len());
+    eprintln!("[gfx] {} pipeline archive(s) loaded in {:.1} s", archives.len(), t0.elapsed().as_secs_f32());
     (!archives.is_empty()).then(|| Shared(NSArray::from_retained_slice(&archives)))
 });
+
+fn is_archive(name: &str) -> bool {
+    name.starts_with("pipelines") && name.ends_with(".metalar")
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Recorded {
@@ -849,25 +855,36 @@ pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>,
     if std::env::var_os("NX_PIPELINE_ARCHIVE").is_none() || list.is_empty() {
         return Ok(());
     }
-    let archive = gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new()).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
-    let archive = Shared(archive);
+    let archives = (0..list.len().div_ceil(ARCHIVE_CHUNK))
+        .map(|_| gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new()).map(Shared))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
     let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| loop {
-                let Some(r) = list.get(next.fetch_add(1, Relaxed)) else { return };
+                let i = next.fetch_add(1, Relaxed);
+                let Some(r) = list.get(i) else { return };
                 objc2::rc::autoreleasepool(|_| {
                     let (Some(vs), Some(fs)) = (function(r.vs), function(r.fs)) else { return };
                     let d = descriptor(&vs.func.0, &fs.func.0, &r.targets(), r.color_state, r.channel_mask, &r.blend);
-                    if add(&archive, &d) {
+                    if add(&archives[i / ARCHIVE_CHUNK], &d) {
                         built.fetch_add(1, Relaxed);
                     }
                 });
             });
         }
     });
-    let path = format!("{}/{ARCHIVE_FILE}", super::shaders::aot_dir());
-    archive.0.serializeToURL_error(&NSURL::fileURLWithPath(&NSString::from_str(&path))).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
+    let dir = super::shaders::aot_dir();
+    for f in std::fs::read_dir(dir)?.flatten() {
+        if is_archive(&f.file_name().to_string_lossy()) {
+            std::fs::remove_file(f.path())?;
+        }
+    }
+    for (i, archive) in archives.iter().enumerate() {
+        let path = format!("{dir}/pipelines-{i:04}.metalar");
+        archive.0.serializeToURL_error(&NSURL::fileURLWithPath(&NSString::from_str(&path))).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
+    }
     eprintln!("[gfx] precompiled {}/{} recorded pipelines in {:.0} s", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
     Ok(())
 }
