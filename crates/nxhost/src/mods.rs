@@ -151,9 +151,13 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
     if data.starts_with(b"SARC") {
         let entries = nxfs::sarc::sarc(data)?;
         let mut contents: Vec<Vec<u8>> = entries.iter().map(|e| e.data.to_vec()).collect();
+        let mut added: Vec<(&str, Vec<u8>)> = Vec::new();
         for (key, node) in edits {
             let Some(i) = entries.iter().position(|e| e.is(key)) else {
-                eprintln!("[mods] skipped {key}: the archive has no such file");
+                match node {
+                    Node::File(p) => added.push((key, std::fs::read(p)?)),
+                    Node::Archive(_) => eprintln!("[mods] skipped {key}: the archive has no such file"),
+                }
                 continue;
             };
             contents[i] = match node {
@@ -161,7 +165,8 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
                 Node::Archive(inner) => edit(&contents[i], inner).with_context(|| key.clone())?,
             };
         }
-        return nxfs::sarc::rebuild(data, &contents.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let added: Vec<(&str, &[u8])> = added.iter().map(|(k, d)| (*k, d.as_slice())).collect();
+        return nxfs::sarc::rebuild_adding(data, &contents.iter().map(Vec::as_slice).collect::<Vec<_>>(), &added);
     }
     if data.starts_with(b"BNTX") {
         let textures = nxfs::bntx::textures(data)?;

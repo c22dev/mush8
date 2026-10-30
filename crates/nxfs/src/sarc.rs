@@ -227,6 +227,69 @@ pub fn rebuild(data: &[u8], contents: &[&[u8]]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// Rebuilds the archive with new contents for its entries, and adds the entries in `added`
+pub fn rebuild_adding(data: &[u8], contents: &[&[u8]], added: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+    if added.is_empty() {
+        return rebuild(data, contents);
+    }
+    let h = Header::parse(data)?;
+    let entries = sarc(data)?;
+    ensure!(contents.len() == h.count, "SARC has {} entries, got {}", h.count, contents.len());
+    let mut all: Vec<(String, u32, &[u8], usize)> = Vec::new();
+    for (k, e) in entries.iter().enumerate() {
+        let attr = h.u32(data, h.nodes + k * 0x10 + 4);
+        ensure!(attr >> 24 != 0, "cannot add files to a SARC with unnamed entries");
+        let align = 1usize << (h.data_off + h.range(data, k).0).trailing_zeros().min(13);
+        all.push((e.name.clone(), e.hash, contents[k], align));
+    }
+    for &(name, d) in added {
+        let hash = name_hash(name);
+        ensure!(!all.iter().any(|a| a.1 == hash), "{name} has the same hash as a file in the archive");
+        let align = if d.starts_with(b"BNTX") || d.starts_with(b"FRES") { 0x1000 } else { 0x80 };
+        all.push((name.to_string(), hash, d, align));
+    }
+    all.sort_by_key(|a| a.1);
+    let put16 = |o: &mut Vec<u8>, v: u16| o.extend_from_slice(&if h.le { v.to_le_bytes() } else { v.to_be_bytes() });
+    let put32 = |o: &mut Vec<u8>, v: u32| o.extend_from_slice(&if h.le { v.to_le_bytes() } else { v.to_be_bytes() });
+    let mut names = Vec::new();
+    let mut name_at = Vec::new();
+    for a in &all {
+        name_at.push(names.len() / 4);
+        names.extend_from_slice(a.0.as_bytes());
+        names.push(0);
+        names.resize(names.len().next_multiple_of(4), 0);
+    }
+    let mut out = data[..0x14].to_vec();
+    out.extend_from_slice(b"SFAT");
+    put16(&mut out, 0xC);
+    put16(&mut out, all.len() as u16);
+    put32(&mut out, 0x65);
+    let nodes = out.len();
+    out.resize(nodes + all.len() * 0x10, 0);
+    out.extend_from_slice(b"SFNT");
+    put16(&mut out, 8);
+    put16(&mut out, 0);
+    out.extend_from_slice(&names);
+    let data_align = all.iter().map(|a| a.3).max().unwrap_or(4).max(1usize << h.data_off.trailing_zeros().min(13));
+    out.resize(out.len().next_multiple_of(data_align), 0);
+    let data_off = out.len();
+    for (i, a) in all.iter().enumerate() {
+        out.resize(out.len().next_multiple_of(a.3), 0);
+        let start = out.len() - data_off;
+        out.extend_from_slice(a.2);
+        let mut node = Vec::new();
+        put32(&mut node, a.1);
+        put32(&mut node, 0x0100_0000 | name_at[i] as u32);
+        put32(&mut node, start as u32);
+        put32(&mut node, (start + a.2.len()) as u32);
+        out[nodes + i * 0x10..nodes + i * 0x10 + 0x10].copy_from_slice(&node);
+    }
+    let size = out.len() as u32;
+    h.put_u32(&mut out, 8, size);
+    h.put_u32(&mut out, 0xC, data_off as u32);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +360,24 @@ mod tests {
         assert_eq!((e[0].data, e[1].data), (&b"longer than before"[..], &b"x"[..]));
         assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize, out.len());
         assert_eq!((e[0].data.as_ptr() as usize - out.as_ptr() as usize) % 0x80, 0);
+    }
+
+    #[test]
+    fn sarc_rebuild_adds_entries() {
+        let mut d = b"SARC\x14\x00\xFF\xFE\0\0\0\0\0\0\0\0\0\x01\0\0".to_vec();
+        d.extend_from_slice(b"SFAT\x0C\x00\x01\x00\x65\0\0\0");
+        for v in [name_hash("a.szs"), 0x0100_0000, 0, 2] {
+            d.extend_from_slice(&v.to_le_bytes());
+        }
+        d.extend_from_slice(b"SFNT\x08\x00\x00\x00a.szs\0\0\0");
+        d.resize(0x80, 0);
+        d[0xC..0x10].copy_from_slice(&0x80u32.to_le_bytes());
+        d.extend_from_slice(b"hi");
+        let out = rebuild_adding(&d, &[b"hello"], &[("new.msbt", b"MsgStdBn")]).unwrap();
+        let e = sarc(&out).unwrap();
+        let get = |n: &str| e.iter().find(|x| x.name == n).map(|x| x.data);
+        assert_eq!((get("a.szs"), get("new.msbt")), (Some(&b"hello"[..]), Some(&b"MsgStdBn"[..])));
+        assert!(e.windows(2).all(|w| w[0].hash < w[1].hash));
+        assert_eq!(u32::from_le_bytes(out[8..12].try_into().unwrap()) as usize, out.len());
     }
 }
