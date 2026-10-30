@@ -250,6 +250,10 @@ fn pick(open: [bool; MAX_PLAYERS], kept: &Kept, device: Option<u64>) -> Option<u
     first.or_else(|| free().find(|&i| !held(i))).or_else(|| free().min_by_key(|&i| kept[i].map(|(_, at)| at)))
 }
 
+pub fn auto_disable_keyboard() -> bool {
+    std::env::var("NX_AUTO_DISABLE_KEYBOARD").map_or(false, |v| v == "1" || v == "true")
+}
+
 pub struct Pads {
     slots: [Option<Ctl>; MAX_PLAYERS],
     phones: [Option<u64>; MAX_PLAYERS],
@@ -417,7 +421,7 @@ impl Pads {
                     continue;
                 }
                 let mut open = self.open();
-                if self.native_home() {
+                if self.native_home() && !auto_disable_keyboard() {
                     open[self.home] = false;
                 }
                 let Some(i) = pick(open, &self.kept, Some(device)) else {
@@ -463,8 +467,10 @@ impl Pads {
             }
             let next = if own { None } else { pick(self.open(), &self.kept, None) };
             NEXT_NATIVE.store(next.unwrap_or(usize::MAX), std::sync::atomic::Ordering::Relaxed);
-            let touch_slot = if own { self.touch } else { self.native_home().then_some(self.home) };
-            let key_slot = touch_slot.or(Some(0));
+            let has_remote = phones.iter().any(|(d, _)| self.phones.contains(&Some(*d)));
+            let disable_key = auto_disable_keyboard() && has_remote;
+            let touch_slot = if own { self.touch } else if disable_key { None } else { self.native_home().then_some(self.home) };
+            let key_slot = if disable_key { None } else { touch_slot.or(Some(0)) };
             if changed {
                 crate::haptics::set_controllers(&self.slots);
             }
