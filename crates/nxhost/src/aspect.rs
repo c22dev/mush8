@@ -108,10 +108,17 @@ enum Op {
     Hud,
 }
 
+// A pane name ending in * matches every pane that starts with the rest
 struct Rule {
     layout: &'static str,
     panes: &'static [&'static str],
     op: Op,
+}
+
+impl Rule {
+    fn matches(&self, pane: &str) -> bool {
+        self.panes.iter().any(|n| n.strip_suffix('*').map_or(*n == pane, |prefix| pane.starts_with(prefix)))
+    }
 }
 
 const CONTENT_FITTED: &[&str] = &["cm_LoadScreen_00", "mn_L_CharaWin_00"];
@@ -127,6 +134,8 @@ const RULES: &[Rule] = &[
     Rule { layout: "rc_RaceView_Cmn_00", panes: &["L_Fade_00"], op: Op::Fill },
     Rule { layout: "rc_RaceView_2P_Ml", panes: &["L_Fade_00"], op: Op::Fill },
     Rule { layout: "rc_RaceView_4P_Ml", panes: &["L_Fade_00"], op: Op::Fill },
+    // the L and R button hints at the sides of the cup screen
+    Rule { layout: "mn_GrprCupSlct_00", panes: &["P_UndrBase_*"], op: Op::Hud },
     Rule { layout: "mn_Background_00", panes: &["P_Sparkle_00", "P_Monogram_00", "N_TitelePicAll_00"], op: Op::Cover },
     Rule { layout: "mn_TitleScene_00", panes: &["N_Capture_00", "N_Capture_01"], op: Op::Cover },
     Rule { layout: "mn_ModeSlct_00", panes: &["P_Capture_00"], op: Op::Fit },
@@ -210,7 +219,7 @@ impl Plan {
     fn edits(&self, name: &str, l: &Layout) -> Vec<(String, Edit)> {
         let (a, b, s) = (self.axis, self.other(), self.stretch);
         let rules: Vec<&Rule> = RULES.iter().filter(|r| r.layout == name).collect();
-        let ruled = |pane: &str| rules.iter().any(|r| r.panes.contains(&pane));
+        let ruled = |pane: &str| rules.iter().any(|r| r.matches(pane));
         let content_fitted = CONTENT_FITTED.contains(&name) || l.panes().iter().any(|p| p.user_data.iter().any(|u| u == "FrameBufferUse") && is_backdrop(p, a));
         let stretched = STRETCHED_ROOTS.contains(&name) || content_fitted;
         let mut out = Vec::new();
@@ -229,7 +238,7 @@ impl Plan {
             add("RootPane", Edit::Scale(a, 1.0 / s));
         }
         for rule in &rules {
-            for p in rule.panes.iter().filter_map(|n| l.pane(n)) {
+            for p in l.panes().iter().filter(|p| rule.matches(&p.name)) {
                 match rule.op {
                     _ if s == 1.0 && rule.op != Op::Hud => {}
                     Op::Fit => add(&p.name, Edit::Scale(a, 1.0 / s)),
