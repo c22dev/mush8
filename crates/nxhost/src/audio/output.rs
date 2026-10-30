@@ -74,6 +74,11 @@ impl Feed {
         if let Some(w) = &mut self.dump {
             w.write(fresh, self.frames);
         }
+        // NX_MUTE=1 keeps the audio running but silent, for test runs
+        static MUTE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NX_MUTE").is_some());
+        if *MUTE {
+            fresh.fill(0.0);
+        }
     }
 
     fn pull(&mut self, out: &mut [&mut [f32]; CHANNELS]) {

@@ -245,8 +245,14 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
     window.center();
     overlay::set_game_window(&window);
     window.setCollectionBehavior(objc2_app_kit::NSWindowCollectionBehavior::FullScreenPrimary);
-    window.makeKeyAndOrderFront(None);
-    if std::env::var_os("NX_WINDOWED").is_none() {
+    // NX_BACKGROUND=1 opens the window behind the other windows, without focus, for test runs
+    let background = std::env::var_os("NX_BACKGROUND").is_some();
+    if background {
+        window.orderBack(None);
+    } else {
+        window.makeKeyAndOrderFront(None);
+    }
+    if std::env::var_os("NX_WINDOWED").is_none() && !background {
         window.toggleFullScreen(None);
     }
     let win = window.clone();
@@ -286,8 +292,10 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
         objc2_app_kit::NSEvent::addLocalMonitorForEventsMatchingMask_handler(M::LeftMouseDown | M::LeftMouseDragged | M::LeftMouseUp, &mouse)
     };
     std::mem::forget(monitor);
-    #[allow(deprecated)]
-    app.activateIgnoringOtherApps(true);
+    if !background {
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+    }
     app.run();
     std::process::exit(0)
 }
