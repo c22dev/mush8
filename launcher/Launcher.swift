@@ -34,12 +34,12 @@ func tool(_ name: String, in folder: URL) -> URL {
 
 private var nxpatchStamps: [String: String] = [:]
 
-func gameCodeReady(in folder: URL, patches: [String]) -> Bool {
+func gameCodeReady(in folder: URL, patches: [String], modules: [String]) -> Bool {
     let made = try? String(contentsOf: folder.appendingPathComponent("work/v-upd/patched/nxpatch.stamp"), encoding: .utf8)
     guard let made else { return false }
     let tool = tool("nxpatch", in: folder)
-    let args = ["stamp"] + patches.flatMap { ["--patch", $0] }
-    let modified = patches.map { p in
+    let args = ["stamp"] + patches.flatMap { ["--patch", $0] } + modules.flatMap { ["--module", $0] }
+    let modified = (patches + modules).map { p in
         (try? FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent(p).path)[.modificationDate] as? Date).map { "\($0.timeIntervalSince1970)" } ?? ""
     }
     let key = ([tool.path] + args + modified).joined(separator: "\n")
@@ -153,6 +153,8 @@ final class Settings: ObservableObject {
         modOrder = ids
     }
 
+    func codeModules(_ mods: [Mod]) -> [String] { enabledCodeModules(mods, disabled: disabledMods) }
+
     func save() {
         let j: [String: Any] = [
             "folder": folder, "keys": keys, "base": base, "update": update, "dlc": dlc, "network": network,
@@ -214,6 +216,10 @@ func enabledCodePatches(_ mods: [Mod], disabled: [String]) -> [String] {
     mods.filter { !disabled.contains($0.id) && $0.loadable }.flatMap(\.patches)
 }
 
+func enabledCodeModules(_ mods: [Mod], disabled: [String]) -> [String] {
+    mods.filter { !disabled.contains($0.id) && $0.loadable }.flatMap(\.modules)
+}
+
 func ordered(_ mods: [Mod], by order: [String]) -> [Mod] {
     let rank = { (m: Mod) in order.firstIndex(of: m.id) ?? Int.max }
     return mods.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
@@ -238,7 +244,7 @@ func checks(_ s: Settings, mods: [Mod]) -> [Check] {
         Check(id: "Update", ok: has(s.update), detail: has(s.update) ? s.update : "not found"),
         Check(id: "Booster Course Pass", ok: has(s.dlc), detail: has(s.dlc) ? s.dlc : "none", optional: true),
         Check(id: "Mods", ok: !mods.isEmpty, detail: mods.isEmpty ? "none" : "\(on) of \(mods.count) on", optional: true),
-        Check(id: "Game code for this Mac", ok: gameCodeReady(in: f, patches: s.codePatches(mods)) && preparedSource(in: f) == updateSource(s),
+        Check(id: "Game code for this Mac", ok: gameCodeReady(in: f, patches: s.codePatches(mods), modules: s.codeModules(mods)) && preparedSource(in: f) == updateSource(s),
               detail: preparedVersion(in: f).map { "work/v-upd/patched (\($0))" } ?? "work/v-upd/patched"),
         Check(id: "Precompiled shaders", ok: (shaders ?? 0) > 0,
               detail: shaders == 0 ? "none, install the Metal Toolchain and Prepare again" : "work/shader_cache.noindex/heap-segments-v2", optional: shaders == 0),
@@ -265,9 +271,13 @@ final class Preparer: ObservableObject {
             let extract = ["extract", "--keys", s.keys, "--base", s.base, "--update", s.update, "--out", "work/v-upd"]
             steps.append((tool("nxfs", in: f), { extract }))
         }
-        if !gameCodeReady(in: f, patches: s.codePatches(mods)) {
-            steps.append((tool("nxpatch", in: f), { ["rewrite", "--out", "work/v-upd/patched", "work/v-upd/exefs/main", "work/v-upd/exefs/subsdk0", "work/v-upd/exefs/sdk"]
-                + enabledCodePatches(ordered(installedMods(in: f), by: order), disabled: disabled).flatMap { ["--patch", $0] } }))
+        if !gameCodeReady(in: f, patches: s.codePatches(mods), modules: s.codeModules(mods)) {
+            steps.append((tool("nxpatch", in: f), {
+                let now = ordered(installedMods(in: f), by: order)
+                return ["rewrite", "--out", "work/v-upd/patched", "work/v-upd/exefs/main", "work/v-upd/exefs/subsdk0", "work/v-upd/exefs/sdk"]
+                    + enabledCodePatches(now, disabled: disabled).flatMap { ["--patch", $0] }
+                    + enabledCodeModules(now, disabled: disabled).flatMap { ["--module", $0] }
+            }))
         }
         let precompile = s.arguments(mods) + ["--precompile"]
         steps.append((tool("nxhost", in: f), { precompile }))

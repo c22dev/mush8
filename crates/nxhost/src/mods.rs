@@ -69,6 +69,11 @@ fn root(dir: &Path) -> Result<PathBuf> {
     bail!("{}: no RomFS/ExeFS mod for Mario Kart 8 Deluxe ({TITLE_ID}), or exefs_patches directory", dir.display())
 }
 
+// subsdk1 to subsdk9 are extra code modules, which nxpatch converts on macOS (see README, Code modules)
+fn is_code_module(name: &str) -> bool {
+    cfg!(target_os = "macos") && name.len() == 7 && name.strip_prefix("subsdk").is_some_and(|n| matches!(n.as_bytes()[0], b'1'..=b'9'))
+}
+
 fn validate(dir: &Path) -> Result<()> {
     for (name, path) in entries(dir)? {
         if name.to_ascii_lowercase().ends_with(".stub") {
@@ -88,7 +93,7 @@ fn validate(dir: &Path) -> Result<()> {
             if lower.ends_with(".stub") {
                 bail!("{}: Atmosphere .stub file removal is not supported", path.display());
             }
-            if lower == "main" || lower == "sdk" || lower == "rtld" || (lower.starts_with("subsdk") && path.extension().is_none()) {
+            if lower == "main" || lower == "sdk" || lower == "rtld" || (lower.starts_with("subsdk") && path.extension().is_none() && !is_code_module(&lower)) {
                 bail!("{}: native ExeFS modules are not supported; this mod needs code execution, not just a RomFS overlay", path.display());
             }
         }
