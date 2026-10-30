@@ -81,7 +81,7 @@ Any browser can be a controller too : turn "Remote controller" and "Browser cont
 On macOS, if your controller or a part of it (for example rumble) does not work, set "Gamepad driver" to SDL in the launcher
 
 ## Mods
-Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS. Mods load in name order; later mods win file conflicts.
+Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS, to turn each mod on or off. On macOS, drag a mod up or down in that list to change its order. Mods apply from top to bottom, so a lower mod wins when two mods change the same file. New mods go to the bottom.
 
 Use Browse GameBanana to search Mario Kart 8 Deluxe mods by name, section, URL or ID, then choose a file to download and install. The app supports ZIP, 7z and RAR, displays download progress, and supports cancellation. Existing mods are not overwritten. Downloads are limited to 512 MiB and extraction to 2 GiB / 20,000 entries. The flow was informed by [SimpleModDownloader](https://github.com/PoloNX/SimpleModDownloader).
 
@@ -89,7 +89,7 @@ Each mod can contain `romfs` / `exefs` directly or use `atmosphere/contents/0100
 
 On iOS, swipe a mod for file inspection or deletion; long-press also opens its context menu. On macOS, use the context menu. Deletion requires confirmation. The shared top-level `atmosphere` folder is read-only here because it may contain other games' files.
 
-iOS supports RomFS-only mods; code patches require rebuilding on a Mac. On macOS, run Prepare after changing code patches, which must match the game's NSO build ID. ARM32 code, replacement ExeFS modules, Skyline NRO plugins, packed `exefs.nsp` / `romfs.bin`, and `.stub` removal are unsupported. Use mods compatible with your game update; a supported folder layout alone does not establish gameplay compatibility.
+iOS supports RomFS-only mods; code patches and code modules require a Mac. On macOS, run Prepare after changing code patches, which must match the game's NSO build ID. ARM32 code, replacement game modules (`main`, `subsdk0`, `sdk`), Skyline NRO plugins, packed `exefs.nsp` / `romfs.bin`, and `.stub` removal are unsupported. Use mods compatible with your game update; a supported folder layout alone does not establish gameplay compatibility.
 
 ```
 mods/
@@ -105,6 +105,17 @@ mods/
     atmosphere/contents/0100152000022000/romfs/
       Course/Gu_FirstCircuit/course_model.szs
 ```
+
+### Code modules
+A mod can add code to the game as modules named `subsdk1` to `subsdk9` in its `exefs` folder. This works on macOS only. Each module is an NSO for 64-bit ARM, made for the update that you use. Mush8 loads the module after the game modules and runs its init function (`DT_INIT`) before the game starts. Two enabled mods cannot add a module with the same name.
+
+A module can import the symbols that the game's modules export, for example `nn::hid::GetNpadState`. It can also import these Skyline functions, which Mush8 gives:
+- `A64HookFunction(target, replace, &original)`: the game calls `replace` in place of the function at `target`, and `original` runs the old function
+- `A64InlineHook(address, callback)`: `callback(ctx)` runs before the instruction at `address`. `ctx` holds x0 to x30, then NZCV. Changes to `ctx` go back into the registers
+- `sky_memcpy(dst, src, size)`: writes bytes into the game code
+- `skyline::utils::getRegionAddress(region)`: the address of the main module's text (0), read-only data (1), data (2) or bss (3)
+
+Mush8 loads the pages of a module with 16 KB alignment, so align each segment of the module (text, read-only data, data) to 0x4000. Skyline plugins for the Switch (`.nro` files in `skyline/plugins`) and 32-bit modules do not work.
 
 ## Limitations
 - free Apple IDs and the `.ipa` (AltStore / SideStore) don't get the extended virtual addressing entitlement, so the game runs with a smaller 5 GB memory layout

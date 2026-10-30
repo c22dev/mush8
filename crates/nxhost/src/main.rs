@@ -24,6 +24,7 @@ mod sdl;
 mod shm;
 mod stubs;
 mod nvn;
+mod plugins;
 mod svc;
 mod webpad;
 
@@ -297,7 +298,12 @@ fn start(args: Args) -> Result<()> {
     let a = kernel::aspace();
     eprintln!("[host] guest address space at {:#x}..{:#x}", a.base, a.base + a.layout.total());
 
-    let mods = loader::load(&dir, &["main", "subsdk0", "sdk"], &hle::table())?;
+    let mut names = vec!["main".to_string(), "subsdk0".into(), "sdk".into()];
+    names.extend((1..=9).map(|i| format!("subsdk{i}")).filter(|n| dir.join(format!("{n}.layout")).exists()));
+    for n in &names[3..] {
+        eprintln!("[host] code module {n} from a mod");
+    }
+    let mods = loader::load(&dir, &names.iter().map(String::as_str).collect::<Vec<_>>(), &hle::table())?;
     let _ = diag::MODULES.set(
         mods.iter()
             .map(|m| {
