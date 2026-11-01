@@ -589,7 +589,7 @@ static ARCHIVES: LazyLock<Option<Shared<NSArray<Archive>>>> = LazyLock::new(|| {
         .ok()?
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| is_archive(n))
+        .filter(|n| is_archive(n) && n.starts_with("pipelines-"))
         .collect();
     files.sort();
     let t0 = std::time::Instant::now();
@@ -605,6 +605,7 @@ static ARCHIVES: LazyLock<Option<Shared<NSArray<Archive>>>> = LazyLock::new(|| {
     (!archives.is_empty()).then(|| Shared(NSArray::from_retained_slice(&archives)))
 });
 
+// older builds wrote one pipelines.metalar: Prepare deletes it, but loading it would stall the game for minutes
 fn is_archive(name: &str) -> bool {
     name.starts_with("pipelines") && name.ends_with(".metalar")
 }
