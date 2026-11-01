@@ -861,6 +861,7 @@ pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>,
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
     let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let per_archive: Vec<AtomicUsize> = archives.iter().map(|_| AtomicUsize::new(0)).collect();
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| loop {
@@ -871,6 +872,7 @@ pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>,
                     let d = descriptor(&vs.func.0, &fs.func.0, &r.targets(), r.color_state, r.channel_mask, &r.blend);
                     if add(&archives[i / ARCHIVE_CHUNK], &d) {
                         built.fetch_add(1, Relaxed);
+                        per_archive[i / ARCHIVE_CHUNK].fetch_add(1, Relaxed);
                     }
                 });
             });
@@ -882,7 +884,8 @@ pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>,
             std::fs::remove_file(f.path())?;
         }
     }
-    for (i, archive) in archives.iter().enumerate() {
+    // a chunk whose pipelines all failed gets no file
+    for (i, archive) in archives.iter().enumerate().filter(|(i, _)| per_archive[*i].load(Relaxed) > 0) {
         let path = format!("{dir}/pipelines-{i:04}.metalar");
         archive.0.serializeToURL_error(&NSURL::fileURLWithPath(&NSString::from_str(&path))).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
     }
