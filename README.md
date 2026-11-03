@@ -17,6 +17,8 @@ Because Nintendo ninjas are always watching, you will need your own dump :
 - a `Firmware` folder dumped from your Switch (fonts, Miis)
 - optionally, the Booster Course Pass, named `dlc.nsp`
 
+- optionally, your Miis : the `MiiDatabase.dat` from your Switch's system save `8000000000000030`, or single `.charinfo` (0x58 bytes) / `.storedata` (0x44 bytes) Mii files. Import them under Miis in the launcher (they go in a `miis` folder next to your game files) and they show up next to the default Miis in the game
+
 Mush8 will then asks for them : on macOS pick the folder holding them in the launcher, on iOS import them from the app (or copy them in Files → On My iPhone → Mush8)
 
 ## Requirements
@@ -70,6 +72,12 @@ Pick a mode in the launcher, under Multiplayer :
 - Nextendo : Mario Kart 8 Deluxe online on the [Nextendo Network](https://nextendo.network) servers, with Switch players using [Prelude-Nextendo](https://github.com/NextendoNetwork/Prelude-Nextendo). Sign in with your Nextendo account under Multiplayer (on nextendo.network, Mush8 never sees your password). Needs update 4.0.1. In this mode the game's own Online button and online ghost options come back, and Local Wireless becomes LAN
 
 In Nextendo mode the game can only look up Nextendo's servers : every other name is blocked, and TLS is only accepted from Nextendo's addresses. Mush8 keeps your sign-in in the Keychain and sends its game token only to Nextendo. Online races are peer to peer, so other players see your IP address, and the game's code runs unsandboxed on your device, so only play with people you trust if you're worried about that
+
+## Profile
+Customize your player profile under the `Player` tab.
+- Player name : The name your profile. Will show up in lobbies and timetrial records.
+- Country : The country for your profile. Will show up as a country flag in lobbies and timetrial records.
+- Mii's : Allows you to upload your own mii database with custom mii's.
 
 ## Controls
 Any controller normally works (Switch Pro, Joy-Con, DualSense, Xbox...). On macOS the keyboard works too (WASD stick, arrows d-pad, X/Return A, Z/Backspace B, Q/E L/R, 1/3 ZL/ZR, Tab +), on iOS there are touch controls when no controller is connected

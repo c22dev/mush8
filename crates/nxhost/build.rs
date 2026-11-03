@@ -62,7 +62,7 @@ fn main() {
 }
 
 fn build_launcher() {
-    let sources = ["../../ios/Launcher.swift", "../../launcher/ModDiscovery.swift", "../../launcher/ModContents.swift", "../../launcher/GameBanana.swift", "../../launcher/ModInstaller.swift", "../../launcher/ModBrowser.swift", "../../launcher/ModList.swift", "../../launcher/Nextendo.swift"];
+    let sources = ["../../ios/Launcher.swift", "../../launcher/ModDiscovery.swift", "../../launcher/ModContents.swift", "../../launcher/GameBanana.swift", "../../launcher/ModInstaller.swift", "../../launcher/ModBrowser.swift", "../../launcher/ModList.swift", "../../launcher/Nextendo.swift", "../../launcher/Miis.swift", "../../launcher/Player.swift"];
     for source in sources {
         println!("cargo:rerun-if-changed={source}");
     }
