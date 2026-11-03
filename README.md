@@ -75,7 +75,7 @@ In Nextendo mode the game can only look up Nextendo's servers : every other name
 
 ## Profile
 Customize your player profile under the `Player` tab.
-- Player name : The name your profile. Will show up in lobbies and timetrial records.
+- Player name : The name your profile. Will show up in lobbies and timetrial records. (Select `Nextendo` to sync with your nextendo profile).
 - Country : The country for your profile. Will show up as a country flag in lobbies and timetrial records.
 - Mii's : Allows you to upload your own mii database with custom mii's.
 
