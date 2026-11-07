@@ -7,10 +7,12 @@ cd "$(dirname "$0")"
 MODE=""
 DEVICE=""
 SHADERS=0
+ROMFS=0
 for a in "$@"; do
   case "$a" in
     --install|--ipa) MODE="$a" ;;
     --shaders) SHADERS=1 ;;
+    --romfs) ROMFS=1 ;;
     *) DEVICE="$a" ;;
   esac
 done
@@ -60,6 +62,22 @@ if [ "$SHADERS" = 1 ] || [ ! -f "$CACHE/index.tsv" ] || [ "$(cat "$CACHE/pipelin
     || { tail -20 work/precompile_ios.log; exit 1; }
   tail -3 work/precompile_ios.log
   echo "$STAMP" > "$CACHE/pipelines.stamp"
+fi
+
+PREPARED=work/prepared_ios.noindex/prepared
+if [ "$ROMFS" = 1 ]; then
+  ROMFS_STAMP="$(echo "$SOURCE $(stat -L -f %z base.nsp) $(stat -L -f %z dlc.nsp 2>/dev/null) ${NX_ASTC_QUALITY:-} ${NX_TEXTURE_BC1_BLOCK:-} ${NX_TEXTURE_FORMATS:-} 1" | shasum | cut -d' ' -f1)"
+  if [ ! -f "$PREPARED/romfs.bin" ] || [ "$(cat "$PREPARED/stamp" 2>/dev/null)" != "$ROMFS_STAMP" ]; then
+    echo "preparing the game data for iOS, BC textures to ASTC (log: work/prepare_ios.log)…"
+    ./target/release/nxhost --update "$UPDATE" --prepare > work/prepare_ios.log 2>&1 || { tail -20 work/prepare_ios.log; exit 1; }
+    grep '^\[prep\]' work/prepare_ios.log | grep -v ' files (' | tail -15
+    echo "$ROMFS_STAMP" > "$PREPARED/stamp"
+  fi
+  echo "prepared game data: $PREPARED ($(du -sh "$PREPARED" | cut -f1)). Copy the folder into the app's Files as 'prepared':"
+  for f in "$PREPARED"/romfs.bin "$PREPARED"/dlc-*.bin "$PREPARED"/main_id; do
+    [ -e "$f" ] || continue
+    echo "  xcrun devicectl device copy to --device <id> --domain-type appDataContainer --domain-identifier $BUNDLE_ID --source $f --destination Documents/prepared/$(basename "$f")"
+  done
 fi
 
 NX_MODULES_DIR="$PATCHED" IPHONEOS_DEPLOYMENT_TARGET=26.0 \

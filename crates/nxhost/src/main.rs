@@ -67,6 +67,28 @@ fn program(n: &nxfs::Nsp) -> Result<&nxfs::nca::Nca> {
     n.find(nxfs::nca::ContentType::Program).context("no Program NCA")
 }
 
+fn prepared_storage(path: &std::path::Path) -> Result<nxfs::storage::DynStorage> {
+    let file = std::fs::File::open(path).with_context(|| path.display().to_string())?;
+    let size = file.metadata()?.len();
+    Ok(std::sync::Arc::new(nxfs::storage::FileRange::new(std::sync::Arc::new(file), 0, size)))
+}
+
+fn prepared_dlc(dir: &std::path::Path) -> Vec<(u64, nxfs::storage::DynStorage)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_prefix("dlc-").and_then(|n| n.strip_suffix(".bin")).and_then(|n| u64::from_str_radix(n, 16).ok()) else { continue };
+        match prepared_storage(&e.path()) {
+            Ok(s) => {
+                eprintln!("[host] add-on content {id:016x} (prepared)");
+                out.push((id, s));
+            }
+            Err(err) => eprintln!("[host] {name}: {err:#}"),
+        }
+    }
+    out
+}
+
 fn load_dlc(args: &Args, keys: &nxfs::keys::Keys) -> Vec<(u64, nxfs::storage::DynStorage)> {
     let default = PathBuf::from("dlc.nsp");
     let paths = if args.dlc.is_empty() && default.exists() { vec![default] } else { args.dlc.clone() };
@@ -121,6 +143,10 @@ struct Args {
     mods: Vec<PathBuf>,
     #[arg(long)]
     precompile: bool,
+    #[arg(long)]
+    prepare: bool,
+    #[arg(long)]
+    prepared: Option<PathBuf>,
 }
 
 #[cfg(target_os = "macos")]
@@ -158,6 +184,15 @@ fn main() {
     gfx::run_app(move || {
         apply_launcher_settings();
         args.mods = ios_mods();
+        if std::path::Path::new("prepared/romfs.bin").exists() {
+            let nsps = ["prod.keys", "base.nsp", "update.nsp"].into_iter().all(|f| update_file(std::path::Path::new(f)).exists());
+            let ram = physical_memory();
+            if ram < 7 << 30 || !nsps {
+                args.prepared = Some(PathBuf::from("prepared"));
+                return start(args);
+            }
+            eprintln!("[host] {} MB of RAM: using the .nsp files, not the prepared game data", ram >> 20);
+        }
         let missing: Vec<&str> = ["prod.keys", "base.nsp", "update.nsp"].into_iter().filter(|f| !update_file(std::path::Path::new(f)).exists()).collect();
         anyhow::ensure!(
             missing.is_empty(),
@@ -166,6 +201,14 @@ fn main() {
         );
         start(args)
     })
+}
+
+#[cfg(target_os = "ios")]
+fn physical_memory() -> u64 {
+    let mut v: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let r = unsafe { libc::sysctlbyname(c"hw.memsize".as_ptr(), &mut v as *mut u64 as *mut libc::c_void, &mut len, std::ptr::null_mut(), 0) };
+    if r == 0 { v } else { u64::MAX }
 }
 
 #[cfg(target_os = "ios")]
@@ -263,11 +306,30 @@ fn start(args: Args) -> Result<()> {
     let dir = args.patched.clone();
     let npdm = read_npdm(&args.npdm)?;
 
-    let keys = nxfs::keys::Keys::load(&args.keys)?;
-    let base = nxfs::Nsp::open(&args.base, &keys)?;
-    let update = nxfs::Nsp::open(&update_file(&args.update), &keys)?;
-    let version = game::identify(&update, &dir)?;
-    let romfs = mods::romfs(program(&update)?.patched_romfs(program(&base)?)?, &args.mods)?;
+    let prepared = args.prepared.clone().filter(|p| p.join("romfs.bin").exists() && !args.prepare);
+    let (keys, version, romfs, dlc) = match &prepared {
+        Some(p) => {
+            let keys = nxfs::keys::Keys::load(&args.keys).unwrap_or_default();
+            let version = game::identify_id(std::fs::read_to_string(p.join("main_id")).context("prepared game data has no main_id")?.trim(), &dir)?;
+            eprintln!("[host] using the prepared game data in {}", p.display());
+            (keys, version, mods::romfs(prepared_storage(&p.join("romfs.bin"))?, &args.mods)?, prepared_dlc(p))
+        }
+        None => {
+            let keys = nxfs::keys::Keys::load(&args.keys)?;
+            let base = nxfs::Nsp::open(&args.base, &keys)?;
+            let update = nxfs::Nsp::open(&update_file(&args.update), &keys)?;
+            let version = game::identify(&update, &dir)?;
+            #[cfg(target_os = "macos")]
+            if args.prepare {
+                let romfs = program(&update)?.patched_romfs(program(&base)?)?;
+                gfx::transcode::prepare(romfs, load_dlc(&args, &keys), &game::update_main_id(&update)?, std::path::Path::new("work/prepared_ios.noindex"))?;
+                std::process::exit(0);
+            }
+            let romfs = mods::romfs(program(&update)?.patched_romfs(program(&base)?)?, &args.mods)?;
+            let dlc = load_dlc(&args, &keys);
+            (keys, version, romfs, dlc)
+        }
+    };
     eprintln!("[host] RomFS: {:.2} GB", nxfs::storage::Storage::size(&*romfs) as f64 / 1e9);
     if args.precompile {
         let modules: Vec<PathBuf> = ["main", "subsdk0", "sdk"].iter().map(|m| dir.join(format!("{m}.bin"))).collect();
@@ -281,7 +343,7 @@ fn start(args: Args) -> Result<()> {
         sd_dir: args.sdmc.clone(),
         system_dir: args.system.clone(),
         firmware_dir: args.firmware.clone(),
-        dlc: load_dlc(&args, &keys),
+        dlc,
         keys,
     });
 

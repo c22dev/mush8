@@ -6,6 +6,8 @@ pub mod bc;
 pub mod overlay;
 #[cfg(target_os = "ios")]
 mod touch;
+#[cfg(target_os = "macos")]
+pub mod transcode;
 
 #[cfg(target_os = "ios")]
 pub use ios::{run_app, set_touch_controls, set_touch_idle, tv, wait_foreground};
