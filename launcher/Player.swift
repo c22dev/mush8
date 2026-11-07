@@ -16,6 +16,15 @@ func playerNickname(nextendo: Bool, source: String, custom: String, nextendoName
 
 func playerCountry(nextendo: Bool, country: String) -> String { nextendo ? country : "" }
 
+func limitedNickname(_ name: String) -> String {
+    var out = ""
+    for letter in name {
+        guard out.unicodeScalars.count + letter.unicodeScalars.count <= 10, out.utf8.count + letter.utf8.count <= 0x1F else { break }
+        out.append(letter)
+    }
+    return out
+}
+
 struct PlayerIdentity: View {
     let nextendo: Bool
     let nextendoName: String
@@ -32,7 +41,7 @@ struct PlayerIdentity: View {
         }
         if !nextendo || nameSource == "custom" {
             TextField(nextendo ? "Name" : "Player name", text: $name, prompt: Text("Player"))
-                .onChange(of: name) { if name.count > 10 { name = String(name.prefix(10)) } }
+                .onChange(of: name) { name = limitedNickname(name) }
         }
         if nextendo {
             Picker("Country", selection: $country) {
