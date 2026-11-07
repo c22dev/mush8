@@ -95,6 +95,7 @@ final class Settings: ObservableObject {
     @Published var spatial = true
     @Published var backgroundCompile = true
     @Published var motion = false
+    @Published var touchscreen = true
     @Published var phonePads = true
     @Published var browserPads = false
     @Published var handheld = false
@@ -133,6 +134,7 @@ final class Settings: ObservableObject {
         spatial = j["spatial_audio"] as? Bool ?? true
         backgroundCompile = j["background_compile"] as? Bool ?? true
         motion = j["motion_controls"] as? Bool ?? false
+        touchscreen = j["touchscreen"] as? Bool ?? true
         phonePads = j["phone_pads"] as? Bool ?? true
         browserPads = j["browser_pads"] as? Bool ?? false
         handheld = j["handheld"] as? Bool ?? false
@@ -154,7 +156,7 @@ final class Settings: ObservableObject {
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
             "nextendo_pid": NSNumber(value: nextendoPid), "nextendo_name": nextendoName, "nickname": nickname, "nickname_source": nicknameSource,
             "country": country,
-            "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
+            "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion, "touchscreen": touchscreen,
             "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
             "disabled_mods": disabledMods,
@@ -190,6 +192,7 @@ final class Settings: ObservableObject {
         if !spatial { env["NX_SPATIAL"] = "0" }
         if !backgroundCompile { env["NX_SYNC_SHADERS"] = "1" }
         env["NX_MOTION"] = motion ? "1" : "0"
+        if !touchscreen { env["NX_TOUCHSCREEN"] = "0" }
         env["NX_PHONE_PADS"] = phonePads ? "1" : "0"
         if phonePads && browserPads { env["NX_BROWSER_PADS"] = "1" }
         if handheld { env["NX_HANDHELD"] = "1" } else if uhd { env["NX_4K"] = "1" }
@@ -628,6 +631,9 @@ struct LauncherView: View {
                 }
             }
             Toggle("Motion controls", isOn: $s.motion)
+            Toggle(isOn: $s.touchscreen) {
+                labeled("Touchscreen", "Clicking on the game window taps the Switch touchscreen")
+            }
             Picker(selection: $s.padDriver) {
                 Text("Apple").tag("apple")
                 Text("SDL").tag("sdl")

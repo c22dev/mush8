@@ -57,6 +57,7 @@ final class Settings: ObservableObject {
     @Published var spatial = true
     @Published var backgroundCompile = true
     @Published var motion = false
+    @Published var touchscreen = true
     @Published var handheld = true
     @Published var phonePads = false
     @Published var browserPads = false
@@ -87,6 +88,7 @@ final class Settings: ObservableObject {
         spatial = json["spatial_audio"] as? Bool ?? true
         backgroundCompile = json["background_compile"] as? Bool ?? true
         motion = json["motion_controls"] as? Bool ?? false
+        touchscreen = json["touchscreen"] as? Bool ?? true
         handheld = json["handheld"] as? Bool ?? true
         phonePads = json["phone_pads"] as? Bool ?? false
         browserPads = json["browser_pads"] as? Bool ?? false
@@ -117,6 +119,7 @@ final class Settings: ObservableObject {
         json["background_compile"] = backgroundCompile
         json["motion"] = nil
         json["motion_controls"] = motion
+        json["touchscreen"] = touchscreen
         json["handheld"] = handheld
         json["phone_pads"] = phonePads
         json["browser_pads"] = browserPads
@@ -386,10 +389,11 @@ struct LauncherView: View {
                         }
                     }
                     Toggle("Motion controls", isOn: $s.motion)
+                    Toggle("Touchscreen", isOn: $s.touchscreen)
                 } header: {
                     Text("Audio & controls")
                 } footer: {
-                    Text("Controller rumble weaker than the cutoff stays off, which stops the constant buzz on Xbox and PlayStation controllers. The phone and Switch controllers are not affected")
+                    Text("Controller rumble weaker than the cutoff stays off, which stops the constant buzz on Xbox and PlayStation controllers. The phone and Switch controllers are not affected. Turn off Touchscreen to stop screen taps reaching the game")
                 }
                 Section {
                     HStack {

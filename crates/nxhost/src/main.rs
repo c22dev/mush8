@@ -285,6 +285,9 @@ fn apply_launcher_settings() {
     if field("spatial_audio").as_deref() == Some("false") {
         unsafe { std::env::set_var("NX_SPATIAL", "0") };
     }
+    if field("touchscreen").as_deref() == Some("false") {
+        unsafe { std::env::set_var("NX_TOUCHSCREEN", "0") };
+    }
     if field("motion_controls").as_deref() == Some("true") {
         unsafe { std::env::set_var("NX_MOTION", "1") };
     }
