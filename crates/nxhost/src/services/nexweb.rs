@@ -1,0 +1,455 @@
+// Mush8 - nexweb.rs
+// Constantin Clerc (c22dev) - 0.1
+use crate::services::nextendo;
+use block2::RcBlock;
+use objc2_foundation::{NSData, NSError, NSHTTPURLResponse, NSMutableURLRequest, NSString, NSURL, NSURLResponse, NSURLSession};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+const BASE: &str = "https://nextendo.network";
+pub const MK8: u64 = crate::svc::PROGRAM_ID;
+const FRIENDS_TTL: Duration = Duration::from_secs(10);
+const PRESENCE_EVERY: Duration = Duration::from_secs(45);
+const PRESENCE_MIN_GAP: Duration = Duration::from_secs(3);
+const MAX_DEPTH: usize = 64;
+
+fn active() -> bool {
+    nextendo::enabled() && !nextendo::token().is_empty()
+}
+
+fn http(method: &str, path: &str, body: Option<&str>) -> Option<(isize, Vec<u8>)> {
+    let rx = objc2::rc::autoreleasepool(|_| {
+        let url = NSURL::URLWithString(&NSString::from_str(&format!("{BASE}{path}")))?;
+        let req = NSMutableURLRequest::requestWithURL(&url);
+        req.setHTTPMethod(&NSString::from_str(method));
+        req.setTimeoutInterval(10.0);
+        let header = |k: &str, v: &str| req.setValue_forHTTPHeaderField(Some(&NSString::from_str(v)), &NSString::from_str(k));
+        header("Authorization", &format!("Bearer {}", nextendo::token()));
+        header("User-Agent", "Mush8");
+        if let Some(b) = body {
+            header("Content-Type", "application/json");
+            req.setHTTPBody(Some(&NSData::with_bytes(b.as_bytes())));
+        }
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let done = RcBlock::new(move |data: *mut NSData, resp: *mut NSURLResponse, _: *mut NSError| {
+            let status = unsafe { resp.as_ref() }.and_then(|r| r.downcast_ref::<NSHTTPURLResponse>()).map_or(0, |r| r.statusCode());
+            let bytes = unsafe { data.as_ref() }.map(|d| d.to_vec()).unwrap_or_default();
+            let _ = tx.try_send((status, bytes));
+        });
+        let task = unsafe { NSURLSession::sharedSession().dataTaskWithRequest_completionHandler(&req, &done) };
+        task.resume();
+        Some(rx)
+    })?;
+    rx.recv_timeout(Duration::from_secs(15)).ok()
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Num(String),
+    Str(String),
+    Arr(Vec<Json>),
+    Obj(Vec<(String, Json)>),
+}
+
+impl Json {
+    pub fn parse(s: &str) -> Option<Json> {
+        let mut p = Parser { s: s.as_bytes(), i: 0, depth: 0 };
+        let v = p.value()?;
+        p.ws();
+        (p.i == p.s.len()).then_some(v)
+    }
+    pub fn get(&self, key: &str) -> &Json {
+        match self {
+            Json::Obj(kv) => kv.iter().find(|(k, _)| k == key).map_or(&Json::Null, |(_, v)| v),
+            _ => &Json::Null,
+        }
+    }
+    pub fn str(&self) -> &str {
+        match self {
+            Json::Str(s) => s,
+            _ => "",
+        }
+    }
+    pub fn u64(&self) -> u64 {
+        match self {
+            Json::Num(n) => n.parse().ok().or_else(|| n.parse::<f64>().ok().filter(|f| *f >= 0.0).map(|f| f as u64)).unwrap_or(0),
+            _ => 0,
+        }
+    }
+    pub fn arr(&self) -> &[Json] {
+        match self {
+            Json::Arr(a) => a,
+            _ => &[],
+        }
+    }
+}
+
+struct Parser<'a> {
+    s: &'a [u8],
+    i: usize,
+    depth: usize,
+}
+
+impl Parser<'_> {
+    fn ws(&mut self) {
+        while self.s.get(self.i).is_some_and(|c| c.is_ascii_whitespace()) {
+            self.i += 1;
+        }
+    }
+    fn eat(&mut self, lit: &str) -> bool {
+        let ok = self.s[self.i..].starts_with(lit.as_bytes());
+        if ok {
+            self.i += lit.len();
+        }
+        ok
+    }
+    fn value(&mut self) -> Option<Json> {
+        self.ws();
+        self.depth += 1;
+        let v = if self.depth > MAX_DEPTH { None } else { self.node() };
+        self.depth -= 1;
+        v
+    }
+    fn node(&mut self) -> Option<Json> {
+        match *self.s.get(self.i)? {
+            b'{' => {
+                self.i += 1;
+                let mut kv = Vec::new();
+                self.ws();
+                if self.eat("}") {
+                    return Some(Json::Obj(kv));
+                }
+                loop {
+                    self.ws();
+                    let k = self.string()?;
+                    self.ws();
+                    self.eat(":").then_some(())?;
+                    kv.push((k, self.value()?));
+                    self.ws();
+                    if self.eat("}") {
+                        return Some(Json::Obj(kv));
+                    }
+                    self.eat(",").then_some(())?;
+                }
+            }
+            b'[' => {
+                self.i += 1;
+                let mut a = Vec::new();
+                self.ws();
+                if self.eat("]") {
+                    return Some(Json::Arr(a));
+                }
+                loop {
+                    a.push(self.value()?);
+                    self.ws();
+                    if self.eat("]") {
+                        return Some(Json::Arr(a));
+                    }
+                    self.eat(",").then_some(())?;
+                }
+            }
+            b'"' => self.string().map(Json::Str),
+            b't' => self.eat("true").then_some(Json::Bool(true)),
+            b'f' => self.eat("false").then_some(Json::Bool(false)),
+            b'n' => self.eat("null").then_some(Json::Null),
+            _ => {
+                let start = self.i;
+                while self.s.get(self.i).is_some_and(|c| matches!(c, b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')) {
+                    self.i += 1;
+                }
+                (self.i > start).then(|| Json::Num(String::from_utf8_lossy(&self.s[start..self.i]).into_owned()))
+            }
+        }
+    }
+    fn hex4(&mut self) -> Option<u32> {
+        let h = std::str::from_utf8(self.s.get(self.i..self.i + 4)?).ok()?;
+        self.i += 4;
+        u32::from_str_radix(h, 16).ok()
+    }
+    fn string(&mut self) -> Option<String> {
+        self.eat("\"").then_some(())?;
+        let mut out = Vec::new();
+        loop {
+            let c = *self.s.get(self.i)?;
+            self.i += 1;
+            match c {
+                b'"' => return String::from_utf8(out).ok(),
+                b'\\' => {
+                    let e = *self.s.get(self.i)?;
+                    self.i += 1;
+                    let ch = match e {
+                        b'n' => '\n',
+                        b't' => '\t',
+                        b'r' => '\r',
+                        b'b' => '\u{8}',
+                        b'f' => '\u{c}',
+                        b'u' => {
+                            let hi = self.hex4()?;
+                            let code = if (0xD800..0xDC00).contains(&hi) && self.eat("\\u") {
+                                let lo = self.hex4()?;
+                                0x10000 + ((hi - 0xD800) << 10) + (lo.wrapping_sub(0xDC00) & 0x3FF)
+                            } else {
+                                hi
+                            };
+                            char::from_u32(code).unwrap_or('\u{FFFD}')
+                        }
+                        e => e as char,
+                    };
+                    let mut b = [0; 4];
+                    out.extend_from_slice(ch.encode_utf8(&mut b).as_bytes());
+                }
+                c => out.push(c),
+            }
+        }
+    }
+}
+
+fn json_str(s: &str) -> String {
+    let mut out = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn base64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { T[(n >> (18 - 6 * i)) as usize & 63] as char } else { '=' });
+        }
+    }
+    out
+}
+
+fn unbase64(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0);
+    for c in s.trim_end_matches('=').bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32;
+        acc = acc << 6 | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Friend {
+    pub pid: u64,
+    pub name: String,
+    pub status: u32,
+    pub app_id: u64,
+    pub app_field: Vec<u8>,
+    pub favorite: bool,
+}
+
+impl Friend {
+    pub fn online(&self) -> bool {
+        self.status > 0
+    }
+    pub fn in_mk8(&self) -> bool {
+        self.online() && self.app_id == MK8
+    }
+}
+
+pub fn parse_friends(body: &str) -> Option<Vec<Friend>> {
+    let root = Json::parse(body)?;
+    let list = root.get("friends");
+    matches!(list, Json::Arr(_)).then_some(())?;
+    Some(
+        list.arr()
+            .iter()
+            .filter_map(|f| {
+                let pres = f.get("presence");
+                let friend = Friend {
+                    pid: f.get("pid").u64(),
+                    name: f.get("name").str().to_string(),
+                    status: pres.get("status").u64() as u32,
+                    app_id: u64::from_str_radix(pres.get("app_id").str(), 16).unwrap_or(0),
+                    app_field: unbase64(pres.get("app_field").str()).unwrap_or_default(),
+                    favorite: *f.get("favorite") == Json::Bool(true),
+                };
+                (friend.pid != 0).then_some(friend)
+            })
+            .collect(),
+    )
+}
+
+#[derive(Default)]
+struct Cache {
+    list: Vec<Friend>,
+    loaded: bool,
+    tried: Option<Instant>,
+    loading: bool,
+}
+
+static FRIENDS: Mutex<Cache> = Mutex::new(Cache { list: Vec::new(), loaded: false, tried: None, loading: false });
+static FRIENDS_READY: Condvar = Condvar::new();
+
+fn refresh_friends() {
+    let fetched = http("GET", "/api/friends", None)
+        .filter(|(status, _)| *status == 200)
+        .and_then(|(_, body)| parse_friends(&String::from_utf8_lossy(&body)));
+    let mut c = FRIENDS.lock().unwrap();
+    match fetched {
+        Some(list) => {
+            if !c.loaded || c.list.len() != list.len() {
+                eprintln!("[nextendo] {} friend(s), {} in Mario Kart", list.len(), list.iter().filter(|f| f.in_mk8()).count());
+            }
+            c.list = list;
+            c.loaded = true;
+        }
+        None if !c.loaded => eprintln!("[nextendo] could not read the friend list"),
+        None => {}
+    }
+    c.tried = Some(Instant::now());
+    c.loading = false;
+    FRIENDS_READY.notify_all();
+}
+
+pub fn friends(wait: Duration) -> Vec<Friend> {
+    if !active() {
+        return Vec::new();
+    }
+    let mut c = FRIENDS.lock().unwrap();
+    let first = c.tried.is_none();
+    if !c.loading && c.tried.is_none_or(|t| t.elapsed() >= FRIENDS_TTL) {
+        c.loading = true;
+        std::thread::spawn(refresh_friends);
+    }
+    if first && c.loading && !wait.is_zero() {
+        c = FRIENDS_READY.wait_timeout_while(c, wait, |c| c.loading).unwrap().0;
+    }
+    c.list.clone()
+}
+
+struct Presence {
+    status: u32,
+    app_field: Vec<u8>,
+    dirty: bool,
+}
+
+static PRESENCE: Mutex<Presence> = Mutex::new(Presence { status: 2, app_field: Vec::new(), dirty: true });
+static PRESENCE_CHANGED: Condvar = Condvar::new();
+
+pub fn presence_body(status: u32, app_field: &[u8]) -> String {
+    let end = app_field.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    format!(
+        "{{\"status\":{status},\"app_field\":{},\"app_id\":{},\"app_detail\":\"\"}}",
+        json_str(&base64(&app_field[..end])),
+        json_str(&format!("{MK8:016X}"))
+    )
+}
+
+fn publish_loop() {
+    let mut last: Option<Instant> = None;
+    let mut published = false;
+    loop {
+        {
+            let p = PRESENCE.lock().unwrap();
+            drop(PRESENCE_CHANGED.wait_timeout_while(p, PRESENCE_EVERY, |p| !p.dirty).unwrap());
+        }
+        if let Some(at) = last {
+            std::thread::sleep(PRESENCE_MIN_GAP.saturating_sub(at.elapsed()));
+        }
+        let body = {
+            let mut p = PRESENCE.lock().unwrap();
+            p.dirty = false;
+            presence_body(p.status, &p.app_field)
+        };
+        let ok = matches!(http("POST", "/api/presence", Some(&body)), Some((200..=299, _)));
+        if ok != published {
+            eprintln!("[nextendo] {}", if ok { "presence published" } else { "could not publish presence" });
+            published = ok;
+        }
+        last = Some(Instant::now());
+    }
+}
+
+pub fn set_presence(status: u32, app_field: &[u8]) {
+    if !active() {
+        return;
+    }
+    let mut p = PRESENCE.lock().unwrap();
+    p.status = status.clamp(1, 2);
+    p.app_field = app_field.to_vec();
+    p.dirty = true;
+    PRESENCE_CHANGED.notify_all();
+}
+
+pub fn start() {
+    if !active() {
+        return;
+    }
+    std::thread::spawn(publish_loop);
+    friends(Duration::ZERO);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_friend_list() {
+        let body = r#"{"friends":[
+            {"pid":1750000123,"name":"Luigi é\"x\"","favorite":true,"since":1700000000,
+             "presence":{"status":2,"app_id":"0100152000022000","app_field":"AQID","jeu":"Mario Kart 8 Deluxe","plateforme":"Ryujinx Nextendo"}},
+            {"pid":42,"name":"Peach","presence":{"status":0,"app_id":"","app_field":""}},
+            {"pid":0,"name":"nobody"}
+        ],"requests":[],"sent":[]}"#;
+        let list = parse_friends(body).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0], Friend { pid: 1750000123, name: "Luigi é\"x\"".into(), status: 2, app_id: MK8, app_field: vec![1, 2, 3], favorite: true });
+        assert!(list[0].in_mk8());
+        assert!(!list[1].online());
+        assert!(parse_friends("{\"error\":\"unauthorized\"}").is_none());
+    }
+
+    #[test]
+    fn json_handles_nesting_and_escapes() {
+        let v = Json::parse(r#" { "a" : [1, -2.5e3, true, null, {"b":"😀\n"}] } "#).unwrap();
+        assert_eq!(v.get("a").arr()[0].u64(), 1);
+        assert_eq!(v.get("a").arr()[4].get("b").str(), "😀\n");
+        assert!(Json::parse("{\"a\":1,}").is_none());
+        assert!(Json::parse("[1] x").is_none());
+        assert!(Json::parse(&format!("{}{}", "[".repeat(MAX_DEPTH), "]".repeat(MAX_DEPTH))).is_some());
+        assert!(Json::parse(&format!("{}{}", "[".repeat(100_000), "]".repeat(100_000))).is_none());
+    }
+
+    #[test]
+    fn presence_body_trims_the_app_field() {
+        let mut field = vec![0u8; 0xC0];
+        field[..3].copy_from_slice(b"Hi\0");
+        field[3] = 7;
+        assert_eq!(presence_body(2, &field), r#"{"status":2,"app_field":"SGkABw==","app_id":"0100152000022000","app_detail":""}"#);
+        assert_eq!(presence_body(1, &[0; 0xC0]), r#"{"status":1,"app_field":"","app_id":"0100152000022000","app_detail":""}"#);
+    }
+
+    #[test]
+    fn base64_round_trips() {
+        for data in [&b""[..], b"f", b"fo", b"foo", b"foob", &[0xfb, 0xff, 0x00]] {
+            assert_eq!(unbase64(&base64(data)).unwrap(), data);
+        }
+    }
+}

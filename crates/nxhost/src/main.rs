@@ -396,6 +396,7 @@ fn start(args: Args) -> Result<()> {
     let h = kernel::create_thread(start, 0, a.stack() + stack_size, npdm.priority as i32, npdm.core as i32)?;
     let t = kernel::thread(h).unwrap();
     services::nextendo::log_start();
+    services::nexweb::start();
     eprintln!("[host] main thread {h:#x}: prio {} core {} stack {stack_size:#x}; entering nn::init::Start", npdm.priority, npdm.core);
     let main_base = mods[0].base;
     let j = kernel::start_thread(t, [h as u64, main_base, init_done as *const () as usize as u64, init_modules as *const () as usize as u64])?;
