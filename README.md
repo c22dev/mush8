@@ -71,7 +71,7 @@ Pick a mode in the launcher, under Multiplayer :
 - LAN : players on the same network, a Switch can join too
 - Online : any lan-play.com server (`host:port`), Switches on that server included
 - Wireless : nearby Mush8 players
-- Nextendo : Mario Kart 8 Deluxe online on the [Nextendo Network](https://nextendo.network) servers, with Switch players using [Prelude-Nextendo](https://github.com/NextendoNetwork/Prelude-Nextendo). Sign in with your Nextendo account under Multiplayer (on nextendo.network, Mush8 never sees your password). Needs update 4.0.1. In this mode the game's own Online button and online ghost options come back, and Local Wireless becomes LAN
+- Nextendo : Mario Kart 8 Deluxe online on the [Nextendo Network](https://nextendo.network) servers, with Switch players using [Prelude-Nextendo](https://github.com/NextendoNetwork/Prelude-Nextendo). Sign in with your Nextendo account under Multiplayer (on nextendo.network, Mush8 never sees your password). Needs update 4.0.1. In this mode the game's own Online button and online ghost options come back, and Local Wireless becomes LAN. Your Nextendo friends show up in the game's Friends list so you can join their races, and they see you playing Mario Kart on nextendo.network and in the Nextendo app
 
 In Nextendo mode the game can only look up Nextendo's servers : every other name is blocked, and TLS is only accepted from Nextendo's addresses. Mush8 keeps your sign-in in the Keychain and sends its game token only to Nextendo. Online races are peer to peer, so other players see your IP address, and the game's code runs unsandboxed on your device, so only play with people you trust if you're worried about that
 
