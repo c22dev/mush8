@@ -3,6 +3,7 @@
 use crate::ipc::{Request, Response, Service, Stub, write_buffer};
 use crate::services::bsd::{self, bytes, bytes_mut, in_buf, out_buf};
 use crate::services::nextendo;
+use crate::services::nextrace::{self, Trace};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme};
@@ -142,6 +143,7 @@ struct Conn {
     tls: Option<ClientConnection>,
     plain: Vec<u8>,
     eof: bool,
+    trace: Option<Trace>,
 }
 
 impl Drop for Conn {
@@ -255,6 +257,9 @@ impl Connection {
             if !busy {
                 let alpn = c.tls.as_ref().and_then(|t| t.alpn_protocol()).map(|p| String::from_utf8_lossy(p).into_owned());
                 eprintln!("[ssl] connected to {} ({})", name.to_str(), alpn.as_deref().unwrap_or("no alpn"));
+                if nextrace::enabled() {
+                    c.trace = Some(Trace::default());
+                }
                 return 0;
             }
             if c.eof {
@@ -284,6 +289,9 @@ impl Connection {
                 let n = c.plain.len().min(out.len());
                 out[..n].copy_from_slice(&c.plain[..n]);
                 if consume {
+                    if let Some(t) = c.trace.as_mut() {
+                        t.received(&out[..n]);
+                    }
                     c.plain.drain(..n);
                 }
                 return Ok(n);
@@ -317,7 +325,11 @@ impl Connection {
                     return Ok(n);
                 }
                 let chunk = &data[..data.len().min(WRITE_CHUNK)];
-                taken = Some(c.tls.as_mut().ok_or(NO_SOCKET)?.writer().write(chunk).map_err(|_| CONNECTION_ABORT)?);
+                let n = c.tls.as_mut().ok_or(NO_SOCKET)?.writer().write(chunk).map_err(|_| CONNECTION_ABORT)?;
+                if let Some(t) = c.trace.as_mut() {
+                    t.sent(&chunk[..n]);
+                }
+                taken = Some(n);
                 continue;
             }
             if let Step::Wait(events) = c.pump()? {

@@ -401,6 +401,7 @@ struct LauncherView: View {
     @StateObject private var prep = Preparer()
     @State private var launchError: String?
     @State private var launching = false
+    @State private var shownRefusal: String?
     @State private var tick = 0
     @State private var copied: String?
     @State private var showMods = false
@@ -697,6 +698,15 @@ struct LauncherView: View {
                 s.nextendoName = login.name
                 s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
+                let gate = await Nextendo.onlineGate(login.token)
+                setenv("NX_NEXTENDO_GATE", gate.log, 1)
+                let refusal = gate.problem.map { "\(login.pid) \($0)" }
+                if let problem = gate.problem, shownRefusal != refusal {
+                    shownRefusal = refusal
+                    launchError = problem + " Press Play again to start anyway: online play won't work until then."
+                    return
+                }
+                shownRefusal = nil
                 launchError = launch(s, mods: mods)
             } catch {
                 launchError = error.localizedDescription
