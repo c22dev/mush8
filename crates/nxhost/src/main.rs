@@ -215,14 +215,10 @@ fn apply_launcher_settings() {
     if let Some(server) = field("lanplay_server").filter(|s| !s.is_empty()) {
         unsafe { std::env::set_var("NX_LANPLAY_SERVER", server) };
     }
-    let nextendo = network == "nextendo";
-    let pick = |source: &str, custom: &str, from_nextendo: &str| {
-        if nextendo && field(source).as_deref() != Some("custom") { field(from_nextendo) } else { field(custom) }
-    };
-    if let Some(name) = pick("nickname_source", "nickname", "nextendo_name") {
+    if let Some(name) = field("player_name") {
         unsafe { std::env::set_var("NX_NICKNAME", name) };
     }
-    if let Some(country) = field("country").filter(|_| nextendo) {
+    if let Some(country) = field("player_country") {
         unsafe { std::env::set_var("NX_COUNTRY", country) };
     }
     if let Some(pid) = field("nextendo_pid").filter(|s| !s.is_empty() && s != "0") {

@@ -105,6 +105,8 @@ final class Settings: ObservableObject {
         json["nickname"] = nickname
         json["nickname_source"] = nicknameSource
         json["country"] = country
+        json["player_name"] = playerNickname(nextendo: network == "nextendo", source: nicknameSource, custom: nickname, nextendoName: nextendoName)
+        json["player_country"] = playerCountry(nextendo: network == "nextendo", country: country)
         json["nextendo_token"] = nil
         json["lan"] = nil
         json["extra_pads"] = nil
