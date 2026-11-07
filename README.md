@@ -56,6 +56,8 @@ Or make an `.ipa` to install with AltStore / SideStore :
 ```
 it ends up in `build/Mush8.ipa`
 
+Add `--romfs` to prepare the game data on your Mac for iPhones below the 15 Pro : it rewrites the BC1, BC3 and BC7 textures as ASTC, so they don't get decoded on the CPU. Copy the `work/prepared_ios.noindex/prepared` folder to the app's files as `prepared`, the phone doesn't need the `.nsp` files with it
+
 Tests :
 ```
 cargo test --workspace
