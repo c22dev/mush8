@@ -1,9 +1,14 @@
 // Mush8 - mii.rs
 // Constantin Clerc (c22dev) - 0.1
 use crate::ipc::{Request, Response, Service, Stub, write_buffer};
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 const CHAR_INFO_SIZE: usize = 0x58;
+const STORE_DATA_SIZE: usize = 0x44;
+const NFDB_SIZE: usize = 0x1A98;
+const NFDB_MAX: usize = 100;
+pub const DIR: &str = "miis";
 const DEFAULT_COUNT: usize = 6;
 const SOURCE_DATABASE: u32 = 1;
 const SOURCE_DEFAULT: u32 = 2;
@@ -64,6 +69,77 @@ fn verify(c: &[u8; CHAR_INFO_SIZE]) -> u32 {
     f(c.as_ptr())
 }
 
+fn bits(w: &[u32; 7], word: usize, off: u32, len: u32) -> u8 {
+    (w[word] >> off & ((1 << len) - 1)) as u8
+}
+
+fn from_store_data(s: &[u8]) -> [u8; CHAR_INFO_SIZE] {
+    let w: [u32; 7] = std::array::from_fn(|i| u32::from_le_bytes(s[i * 4..i * 4 + 4].try_into().unwrap()));
+    let b = |word, off, len| bits(&w, word, off, len);
+    let mut c = [0u8; CHAR_INFO_SIZE];
+    c[..16].copy_from_slice(&s[0x30..0x40]);
+    c[f::NAME..f::NAME + 0x14].copy_from_slice(&s[0x1C..0x30]);
+    c[0x26] = b(2, 22, 2);
+    c[f::FAVORITE_COLOR] = b(5, 8, 4);
+    c[f::GENDER] = b(1, 7, 1);
+    c[f::HEIGHT] = b(0, 8, 7);
+    c[f::BUILD] = b(0, 16, 7);
+    c[0x2B] = b(0, 31, 1);
+    c[0x2C] = b(2, 14, 2);
+    c[f::FACELINE..f::FACELINE + 4].copy_from_slice(&[b(5, 12, 4), b(5, 16, 4), b(5, 20, 4), b(5, 24, 4)]);
+    c[f::HAIR..f::HAIR + 3].copy_from_slice(&[b(0, 0, 8), b(0, 24, 7), b(0, 23, 1)]);
+    c[f::EYE..f::EYE + 7].copy_from_slice(&[b(2, 8, 6), b(1, 0, 7), b(4, 21, 3), b(4, 13, 3), b(4, 5, 3), b(5, 28, 4), b(2, 24, 5)]);
+    c[f::EYEBROW..f::EYEBROW + 7].copy_from_slice(&[b(3, 0, 5), b(1, 8, 7), b(6, 0, 4), b(3, 29, 3), b(6, 4, 4), b(6, 8, 4), b(6, 12, 4)]);
+    c[f::NOSE..f::NOSE + 3].copy_from_slice(&[b(3, 8, 5), b(6, 16, 4), b(3, 16, 5)]);
+    c[f::MOUTH..f::MOUTH + 5].copy_from_slice(&[b(2, 16, 6), b(1, 16, 7), b(6, 20, 4), b(3, 21, 3), b(3, 24, 5)]);
+    c[f::BEARD..f::BEARD + 5].copy_from_slice(&[b(1, 24, 7), b(3, 13, 3), b(3, 5, 3), b(6, 24, 4), b(4, 0, 5)]);
+    c[f::GLASSES..f::GLASSES + 4].copy_from_slice(&[b(5, 0, 5), b(2, 0, 7), b(2, 29, 3), b(4, 8, 5)]);
+    c[f::MOLE..f::MOLE + 4].copy_from_slice(&[b(0, 15, 1), b(6, 28, 4), b(4, 16, 5), b(4, 24, 5)]);
+    c
+}
+
+fn parse(data: &[u8]) -> Vec<[u8; CHAR_INFO_SIZE]> {
+    if data.len() >= NFDB_SIZE && data.starts_with(b"NFDB") {
+        let count = (data[NFDB_SIZE - 3] as usize).min(NFDB_MAX);
+        return data[4..4 + count * STORE_DATA_SIZE].chunks_exact(STORE_DATA_SIZE).map(from_store_data).collect();
+    }
+    match data.len() {
+        CHAR_INFO_SIZE => vec![data.try_into().unwrap()],
+        STORE_DATA_SIZE => vec![from_store_data(data)],
+        _ => Vec::new(),
+    }
+}
+
+fn load(dir: &Path) -> Vec<[u8; CHAR_INFO_SIZE]> {
+    let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
+    files.sort_by_key(|p| (!p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("MiiDatabase.dat")), p.clone()));
+    let mut out: Vec<[u8; CHAR_INFO_SIZE]> = Vec::new();
+    for p in files {
+        let Ok(data) = std::fs::read(&p) else { continue };
+        let miis = parse(&data);
+        if miis.is_empty() {
+            eprintln!("[mii] {}: not a MiiDatabase.dat, CharInfo or StoreData file", p.display());
+        }
+        for c in miis {
+            let r = verify(&c);
+            if r != 0 {
+                eprintln!("[mii] {}: Mii rejected by CharInfoRaw::Verify: code {r:#x}", p.display());
+            } else if out.len() < NFDB_MAX && !out.iter().any(|o| o[..16] == c[..16]) {
+                out.push(c);
+            }
+        }
+    }
+    if !out.is_empty() {
+        eprintln!("[mii] {} Miis loaded from {}", out.len(), dir.display());
+    }
+    out
+}
+
+fn database() -> &'static Vec<[u8; CHAR_INFO_SIZE]> {
+    static D: OnceLock<Vec<[u8; CHAR_INFO_SIZE]>> = OnceLock::new();
+    D.get_or_init(|| load(Path::new(DIR)))
+}
+
 fn defaults() -> &'static Vec<[u8; CHAR_INFO_SIZE]> {
     static D: OnceLock<Vec<[u8; CHAR_INFO_SIZE]>> = OnceLock::new();
     D.get_or_init(|| {
@@ -96,18 +172,24 @@ impl Service for MiiService {
 struct Database;
 
 impl Database {
-    fn listed(flag: u32) -> (&'static [[u8; CHAR_INFO_SIZE]], u32) {
-        if flag & SOURCE_DATABASE != 0 {
-            (defaults().as_slice(), ELEMENT_DATABASE)
-        } else if flag & SOURCE_DEFAULT != 0 {
-            (defaults().as_slice(), ELEMENT_DEFAULT)
-        } else {
-            (&[], ELEMENT_DEFAULT)
+    fn stored() -> &'static [[u8; CHAR_INFO_SIZE]] {
+        if database().is_empty() { defaults() } else { database() }
+    }
+
+    fn listed(flag: u32) -> Vec<(&'static [u8; CHAR_INFO_SIZE], u32)> {
+        let mut v = Vec::new();
+        let from_database = flag & SOURCE_DATABASE != 0;
+        if from_database {
+            v.extend(Self::stored().iter().map(|c| (c, ELEMENT_DATABASE)));
         }
+        if flag & SOURCE_DEFAULT != 0 && !(from_database && database().is_empty()) {
+            v.extend(defaults().iter().map(|c| (c, ELEMENT_DEFAULT)));
+        }
+        v
     }
 
     fn find(id: &[u8]) -> Option<usize> {
-        defaults().iter().position(|c| id.len() >= 16 && c[..16] == id[..16])
+        Self::stored().iter().position(|c| id.len() >= 16 && c[..16] == id[..16])
     }
 }
 
@@ -118,11 +200,11 @@ impl Service for Database {
     fn call(&self, req: &Request, rsp: &mut Response) -> u32 {
         match req.cmd {
             0 | 1 => rsp.data.push(0),
-            2 => rsp.push_u32(Self::listed(req.u32(0)).0.len() as u32),
+            2 => rsp.push_u32(Self::listed(req.u32(0)).len() as u32),
             3 | 4 => {
-                let (list, source) = Self::listed(req.u32(0));
+                let list = Self::listed(req.u32(0));
                 let mut out = Vec::new();
-                for c in list {
+                for &(c, source) in &list {
                     out.extend_from_slice(c);
                     if req.cmd == 3 {
                         out.extend_from_slice(&source.to_le_bytes());
@@ -140,7 +222,10 @@ impl Service for Database {
                 let i = (req.u32(0) as usize).min(DEFAULT_COUNT - 1);
                 rsp.data.extend_from_slice(&defaults()[i]);
             }
-            5 => rsp.data.extend_from_slice(&req.data[..CHAR_INFO_SIZE.min(req.data.len())]),
+            5 => match Self::find(&req.data) {
+                Some(i) if req.u32(CHAR_INFO_SIZE) & SOURCE_DATABASE != 0 => rsp.data.extend_from_slice(&Self::stored()[i]),
+                _ => rsp.data.extend_from_slice(&req.data[..CHAR_INFO_SIZE.min(req.data.len())]),
+            },
             11 => rsp.push_u32(Self::find(&req.data).map_or(-1, |i| i as i32) as u32),
             21 => match Self::find(&req.data) {
                 Some(i) => rsp.push_u32(i as u32),
@@ -158,23 +243,69 @@ mod tests {
     use super::*;
 
     #[test]
-    fn database_entries_are_tagged_and_the_combined_flag_has_no_duplicates() {
-        let (database, source) = Database::listed(SOURCE_DATABASE);
-        assert_eq!(database.len(), DEFAULT_COUNT);
-        assert_eq!(source, ELEMENT_DATABASE);
-        assert_eq!(Database::listed(SOURCE_DEFAULT).1, ELEMENT_DEFAULT);
-        assert_eq!(Database::listed(SOURCE_DATABASE | SOURCE_DEFAULT), (database, ELEMENT_DATABASE));
-        assert!(Database::listed(0).0.is_empty());
-        let ids: std::collections::HashSet<_> = database.iter().map(|c| &c[..16]).collect();
+    fn empty_database_falls_back_to_the_defaults_once() {
+        assert!(database().is_empty());
+        let listed = Database::listed(SOURCE_DATABASE);
+        assert_eq!(listed.len(), DEFAULT_COUNT);
+        assert!(listed.iter().all(|&(_, s)| s == ELEMENT_DATABASE));
+        assert!(Database::listed(SOURCE_DEFAULT).iter().all(|&(_, s)| s == ELEMENT_DEFAULT));
+        assert_eq!(Database::listed(SOURCE_DATABASE | SOURCE_DEFAULT), listed);
+        assert!(Database::listed(0).is_empty());
+        let ids: std::collections::HashSet<_> = listed.iter().map(|(c, _)| &c[..16]).collect();
         assert_eq!(ids.len(), DEFAULT_COUNT);
     }
 
     #[test]
     fn listed_miis_can_be_found_by_id() {
-        for (i, c) in Database::listed(SOURCE_DATABASE).0.iter().enumerate() {
-            assert_eq!(Database::find(c), Some(i));
+        for (i, (c, _)) in Database::listed(SOURCE_DATABASE).iter().enumerate() {
+            assert_eq!(Database::find(&c[..]), Some(i));
         }
         assert_eq!(Database::find(&[0xFF; CHAR_INFO_SIZE]), None);
         assert_eq!(Database::find(&[]), None);
+    }
+
+    fn store_data(id: u8, words: [u32; 7]) -> [u8; STORE_DATA_SIZE] {
+        let mut s = [0u8; STORE_DATA_SIZE];
+        for (i, w) in words.iter().enumerate() {
+            s[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        for (i, ch) in "Lara".encode_utf16().enumerate() {
+            s[0x1C + 2 * i..0x1E + 2 * i].copy_from_slice(&ch.to_le_bytes());
+        }
+        s[0x30] = id;
+        s
+    }
+
+    #[test]
+    fn store_data_fields() {
+        let w0 = 33 | 64 << 8 | 1 << 15 | 70 << 16 | 1 << 23 | 5 << 24;
+        let w1 = 8 | 1 << 7 | 3 << 8 | 19 << 16 | 2 << 24;
+        let w2 = 4 | 2 << 8 | 23 << 16 | 12 << 24 | 6 << 29;
+        let w6 = 4 | 6 << 4 | 2 << 8 | 10 << 12 | 4 << 16 | 5 << 20 | 6 << 24 | 7 << 28;
+        let c = from_store_data(&store_data(9, [w0, w1, w2, 0, 0, 3 << 8, w6]));
+        assert_eq!(c[0], 9);
+        assert_eq!(&c[f::NAME..f::NAME + 4], &[b'L', 0, b'a', 0]);
+        assert_eq!((c[f::GENDER], c[f::HEIGHT], c[f::BUILD], c[f::FAVORITE_COLOR]), (1, 64, 70, 3));
+        assert_eq!(&c[f::HAIR..f::HAIR + 3], &[33, 5, 1]);
+        assert_eq!(&c[f::EYE..f::EYE + 2], &[2, 8]);
+        assert_eq!(c[f::EYE + 6], 12);
+        assert_eq!(&c[f::MOUTH..f::MOUTH + 3], &[23, 19, 5]);
+        assert_eq!((c[f::GLASSES + 1], c[f::GLASSES + 2]), (4, 6));
+        assert_eq!((c[f::MOLE], c[f::MOLE + 1]), (1, 7));
+    }
+
+    #[test]
+    fn nfdb() {
+        let mut db = vec![0u8; NFDB_SIZE];
+        db[..4].copy_from_slice(b"NFDB");
+        for i in 0..3 {
+            db[4 + i * STORE_DATA_SIZE..4 + (i + 1) * STORE_DATA_SIZE].copy_from_slice(&store_data(i as u8 + 1, [0; 7]));
+        }
+        db[NFDB_SIZE - 4] = 1;
+        db[NFDB_SIZE - 3] = 2;
+        let miis = parse(&db);
+        assert_eq!(miis.iter().map(|c| c[0]).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(parse(&[0u8; CHAR_INFO_SIZE]).len(), 1);
+        assert!(parse(&[0u8; 0x20]).is_empty());
     }
 }

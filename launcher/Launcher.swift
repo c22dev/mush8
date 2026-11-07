@@ -84,6 +84,9 @@ final class Settings: ObservableObject {
     @Published var lanPlayServer = ""
     @Published var nextendoPid: UInt64 = 0
     @Published var nextendoName = ""
+    @Published var nickname = ""
+    @Published var nicknameSource = "nextendo"
+    @Published var country = ""
     @Published var pipelineArchive = false
     @Published var prewarm = true
     @Published var rumble = true
@@ -118,6 +121,9 @@ final class Settings: ObservableObject {
         lanPlayServer = j["lanplay_server"] as? String ?? ""
         nextendoPid = (j["nextendo_pid"] as? NSNumber)?.uint64Value ?? 0
         nextendoName = j["nextendo_name"] as? String ?? ""
+        nickname = j["nickname"] as? String ?? ""
+        nicknameSource = j["nickname_source"] as? String ?? nicknameSource
+        country = j["country"] as? String ?? ""
         lanInterface = j["lan_interface"] as? String ?? ""
         pipelineArchive = j["pipeline_archive"] as? Bool ?? false
         prewarm = j["prewarm_pipelines"] as? Bool ?? true
@@ -146,7 +152,8 @@ final class Settings: ObservableObject {
         let j: [String: Any] = [
             "folder": folder, "keys": keys, "base": base, "update": update, "dlc": dlc, "network": network,
             "lan_interface": lanInterface, "lanplay_server": lanPlayServer, "pipeline_archive": pipelineArchive,
-            "nextendo_pid": NSNumber(value: nextendoPid), "nextendo_name": nextendoName,
+            "nextendo_pid": NSNumber(value: nextendoPid), "nextendo_name": nextendoName, "nickname": nickname, "nickname_source": nicknameSource,
+            "country": country,
             "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion,
             "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
@@ -173,6 +180,8 @@ final class Settings: ObservableObject {
         default:
             break
         }
+        env["NX_NICKNAME"] = playerNickname(nextendo: network == "nextendo", source: nicknameSource, custom: nickname, nextendoName: nextendoName)
+        env["NX_COUNTRY"] = playerCountry(nextendo: network == "nextendo", country: country)
         if pipelineArchive { env["NX_PIPELINE_ARCHIVE"] = "1" }
         if prewarm { env["NX_PREWARM"] = "1" }
         if !rumble { env["NX_RUMBLE"] = "0" }
@@ -406,6 +415,8 @@ struct LauncherView: View {
     @State private var copied: String?
     @State private var showMods = false
     @State private var mods: [Mod] = []
+    @State private var miiCount = 0
+    @State private var miiError: String?
 
     var body: some View {
         let _ = tick
@@ -449,9 +460,9 @@ struct LauncherView: View {
         .sheet(isPresented: $showMods, onDismiss: { tick += 1 }) {
             ModsView(s: s, onInstalled: { tick += 1 })
         }
-        .onAppear { mods = installedMods(in: s.folderURL) }
-        .onChange(of: tick) { mods = installedMods(in: s.folderURL) }
-        .onChange(of: s.folder) { mods = installedMods(in: s.folderURL) }
+        .onAppear { reload() }
+        .onChange(of: tick) { reload() }
+        .onChange(of: s.folder) { reload() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in tick += 1 }
     }
 
@@ -543,6 +554,29 @@ struct LauncherView: View {
                         .disabled(s.folder.isEmpty || prep.running)
                 }
             }
+        }
+        Section {
+            PlayerIdentity(nextendo: s.network == "nextendo", nextendoName: s.nextendoName,
+                           nameSource: $s.nicknameSource, name: $s.nickname, country: $s.country)
+            HStack {
+                Text(miiCount == 0 ? "No custom Miis" : "\(miiCount) custom Mii\(miiCount == 1 ? "" : "s")").foregroundStyle(.secondary)
+                Spacer()
+                if miiCount > 0 {
+                    Button("Remove") {
+                        miiError = nil
+                        do { try removeMiis(in: s.folderURL) } catch { miiError = error.localizedDescription }
+                        tick += 1
+                    }
+                }
+                Button("Import…", action: chooseMiis)
+            }
+            .disabled(s.folder.isEmpty || prep.running)
+            if let miiError { Text(miiError).foregroundStyle(.red).font(.callout) }
+        } header: {
+            Text("Player")
+        } footer: {
+            Text("The name is shown on your time trial ghosts and online, 10 characters max. The country sets your flag online with Nextendo. Miis: a MiiDatabase.dat from your Switch, or .charinfo / .storedata Mii files. They show up next to the default Miis in the game")
+                .font(.caption).foregroundStyle(.secondary)
         }
         Section {
             Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1 })) {
@@ -661,6 +695,23 @@ struct LauncherView: View {
         }
         if let k = try? FileManager.default.contentsOfDirectory(atPath: url.path).first(where: { $0.lowercased().hasSuffix(".keys") && $0.lowercased().contains("prod") }) { s.keys = k }
         s.save()
+    }
+
+    func reload() {
+        mods = installedMods(in: s.folderURL)
+        miiCount = s.folder.isEmpty ? 0 : installedMiiCount(in: s.folderURL)
+    }
+
+    func chooseMiis() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.message = "Choose a MiiDatabase.dat or Mii files"
+        guard panel.runModal() == .OK else { return }
+        miiError = nil
+        do { try importMiis(panel.urls, into: s.folderURL) } catch { miiError = error.localizedDescription }
+        tick += 1
     }
 
     func prepare() {

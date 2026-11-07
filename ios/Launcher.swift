@@ -48,6 +48,9 @@ final class Settings: ObservableObject {
     @Published var lanPlayServer = ""
     @Published var nextendoPid: UInt64 = 0
     @Published var nextendoName = ""
+    @Published var nickname = ""
+    @Published var nicknameSource = "nextendo"
+    @Published var country = ""
     @Published var prewarm = true
     @Published var rumble = true
     @Published var rumbleMin = 0.45
@@ -75,6 +78,9 @@ final class Settings: ObservableObject {
         lanPlayServer = json["lanplay_server"] as? String ?? ""
         nextendoPid = (json["nextendo_pid"] as? NSNumber)?.uint64Value ?? 0
         nextendoName = json["nextendo_name"] as? String ?? ""
+        nickname = json["nickname"] as? String ?? ""
+        nicknameSource = json["nickname_source"] as? String ?? nicknameSource
+        country = json["country"] as? String ?? ""
         prewarm = json["prewarm_pipelines"] as? Bool ?? true
         rumble = json["rumble"] as? Bool ?? true
         rumbleMin = json["rumble_min"] as? Double ?? 0.45
@@ -96,6 +102,11 @@ final class Settings: ObservableObject {
         json["lanplay_server"] = lanPlayServer
         json["nextendo_pid"] = NSNumber(value: nextendoPid)
         json["nextendo_name"] = nextendoName
+        json["nickname"] = nickname
+        json["nickname_source"] = nicknameSource
+        json["country"] = country
+        json["player_name"] = playerNickname(nextendo: network == "nextendo", source: nicknameSource, custom: nickname, nextendoName: nextendoName)
+        json["player_country"] = playerCountry(nextendo: network == "nextendo", country: country)
         json["nextendo_token"] = nil
         json["lan"] = nil
         json["extra_pads"] = nil
@@ -261,6 +272,9 @@ struct LauncherView: View {
     @State private var deletingMod: Mod?
     @State private var modActionError: String?
     @State private var mods: [Mod] = []
+    @State private var pickingMiis = false
+    @State private var miiCount = 0
+    @State private var miiError: String?
     @State private var memory = os_proc_available_memory()
     @Environment(\.scenePhase) private var phase
     let play: () -> Void
@@ -329,6 +343,7 @@ struct LauncherView: View {
                         : "Nearby iPhones can join as players with \"Use as a controller\"")
                 }
                 modsSection
+                miisSection
                 Section {
                     Picker("Console mode", selection: $s.handheld) {
                         Text("Docked (1080p)").tag(false)
@@ -394,8 +409,15 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
         }
         .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .folder], allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result { files.copy(urls) }
+        .fileImporter(isPresented: $picking, allowedContentTypes: pickingMiis ? [.data] : [.data, .folder], allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            if pickingMiis {
+                miiError = nil
+                do { try importMiis(urls, into: docsURL) } catch { miiError = error.localizedDescription }
+                miiCount = installedMiiCount(in: docsURL)
+            } else {
+                files.copy(urls)
+            }
         }
         .fullScreenCover(isPresented: $browsingMods, onDismiss: { mods = installedMods(in: docsURL) }) {
             ModBrowserView(folder: docsURL) { name in
@@ -408,6 +430,7 @@ struct LauncherView: View {
         .onAppear {
             files.scan()
             mods = installedMods(in: docsURL)
+            miiCount = installedMiiCount(in: docsURL)
             if usesLocalNetwork { network.request() }
         }
         .onChange(of: s.network) { if usesLocalNetwork { network.request() } }
@@ -416,6 +439,7 @@ struct LauncherView: View {
             if p == .active {
                 files.scan()
                 mods = installedMods(in: docsURL)
+                miiCount = installedMiiCount(in: docsURL)
             }
         }
         .task {
@@ -449,6 +473,30 @@ struct LauncherView: View {
             ModsHeader(mods: mods, disabled: s.disabledMods)
         } footer: {
             Text("Swipe to delete; long press for files. Lower mods win conflicts. RomFS loads on Play; code patches don't run on iOS.")
+        }
+    }
+
+    var miisSection: some View {
+        Section {
+            PlayerIdentity(nextendo: s.network == "nextendo", nextendoName: s.nextendoName,
+                           nameSource: $s.nicknameSource, name: $s.nickname, country: $s.country)
+            Button("Import Miis…") {
+                pickingMiis = true
+                picking = true
+            }
+                .disabled(files.copying != nil)
+            if miiCount > 0 {
+                Button("Remove custom Miis", role: .destructive) {
+                    miiError = nil
+                    do { try removeMiis(in: docsURL) } catch { miiError = error.localizedDescription }
+                    miiCount = installedMiiCount(in: docsURL)
+                }
+            }
+            if let miiError { Text(miiError).foregroundStyle(.red).font(.callout) }
+        } header: {
+            Text(miiCount == 0 ? "Player" : "Player · \(miiCount) Miis")
+        } footer: {
+            Text("The name is shown on your time trial ghosts and online, 10 characters max. The country sets your flag online with Nextendo. Miis: a MiiDatabase.dat from your Switch, or .charinfo / .storedata Mii files. They show up next to the default Miis in the game")
         }
     }
 
@@ -488,7 +536,10 @@ struct LauncherView: View {
                 ProgressView()
                 Text("Copying \(name)…").font(.callout)
             } else {
-                Button("Import game files") { picking = true }
+                Button("Import game files") {
+                    pickingMiis = false
+                    picking = true
+                }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                 Text("Import prod.keys, the base game and update .nsp files and the Firmware folder (+DLC)/put them in On My iPhone")
