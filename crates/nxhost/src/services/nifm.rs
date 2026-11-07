@@ -1,6 +1,6 @@
 // Mush8 - nifm.rs
 // Constantin Clerc (c22dev) - 0.1
-use crate::ipc::{Act, Request, Response, Service, Stub, Table, new_event};
+use crate::ipc::{Act, Request, Response, Service, Stub, Table, new_event, write_buffer};
 use crate::services::vnet::{self, Mode};
 use std::sync::Arc;
 
@@ -106,6 +106,23 @@ impl Service for GeneralService {
                 rsp.data.push(1);
                 rsp.data.extend_from_slice(&gateway);
                 rsp.data.extend_from_slice(&[0; 4]);
+            }
+            5 => {
+                let mut p = [0u8; 0x17C];
+                p[0] = 1;
+                p[1..5].copy_from_slice(&addr);
+                p[5..9].copy_from_slice(&mask);
+                p[9..13].copy_from_slice(&gateway);
+                p[0x0D] = 1;
+                p[0x0E..0x12].copy_from_slice(&gateway);
+                p[0xC0..0xC2].copy_from_slice(&1500u16.to_le_bytes());
+                p[0xC2..0xD2].copy_from_slice(b"Mush8 network\0\0\0");
+                p[0xD2..0xD7].copy_from_slice(b"Mush8");
+                p[0x113] = 2;
+                p[0x114] = 1;
+                if let Some(b) = req.out_buffer() {
+                    write_buffer(&b, &p);
+                }
             }
             18 => rsp.data.extend_from_slice(&[2, 3, 4]),
             20..=22 => rsp.push_u32(1),
