@@ -7,6 +7,8 @@ const CHAR_INFO_SIZE: usize = 0x58;
 const DEFAULT_COUNT: usize = 6;
 const SOURCE_DATABASE: u32 = 1;
 const SOURCE_DEFAULT: u32 = 2;
+const ELEMENT_DATABASE: u32 = 0;
+const ELEMENT_DEFAULT: u32 = 1;
 const NOT_FOUND: u32 = 126 | 1 << 9;
 
 pub static VERIFY: OnceLock<u64> = OnceLock::new();
@@ -94,25 +96,18 @@ impl Service for MiiService {
 struct Database;
 
 impl Database {
-    fn listed(flag: u32) -> Vec<[u8; CHAR_INFO_SIZE]> {
-        // Until a Mii editor/database is implemented, expose the built-in Miis
-        // as database entries too. An empty database sends MK8 into AppendMii.
-        if flag & (SOURCE_DATABASE | SOURCE_DEFAULT) != 0 { defaults().clone() } else { Vec::new() }
+    fn listed(flag: u32) -> (&'static [[u8; CHAR_INFO_SIZE]], u32) {
+        if flag & SOURCE_DATABASE != 0 {
+            (defaults().as_slice(), ELEMENT_DATABASE)
+        } else if flag & SOURCE_DEFAULT != 0 {
+            (defaults().as_slice(), ELEMENT_DEFAULT)
+        } else {
+            (&[], ELEMENT_DEFAULT)
+        }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn database_has_selectable_miis_without_duplicate_combined_sources() {
-        let database = Database::listed(SOURCE_DATABASE);
-        assert_eq!(database.len(), DEFAULT_COUNT);
-        assert_eq!(Database::listed(SOURCE_DATABASE | SOURCE_DEFAULT), database);
-        assert!(Database::listed(0).is_empty());
-        let ids: std::collections::HashSet<_> = database.iter().map(|c| &c[..16]).collect();
-        assert_eq!(ids.len(), DEFAULT_COUNT);
+    fn find(id: &[u8]) -> Option<usize> {
+        defaults().iter().position(|c| id.len() >= 16 && c[..16] == id[..16])
     }
 }
 
@@ -123,14 +118,14 @@ impl Service for Database {
     fn call(&self, req: &Request, rsp: &mut Response) -> u32 {
         match req.cmd {
             0 | 1 => rsp.data.push(0),
-            2 => rsp.push_u32(Self::listed(req.u32(0)).len() as u32),
+            2 => rsp.push_u32(Self::listed(req.u32(0)).0.len() as u32),
             3 | 4 => {
-                let list = Self::listed(req.u32(0));
+                let (list, source) = Self::listed(req.u32(0));
                 let mut out = Vec::new();
-                for c in &list {
+                for c in list {
                     out.extend_from_slice(c);
                     if req.cmd == 3 {
-                        out.extend_from_slice(&1u32.to_le_bytes());
+                        out.extend_from_slice(&source.to_le_bytes());
                     }
                 }
                 let n = req.out_buffer().map_or(0, |b| write_buffer(&b, &out)) / if req.cmd == 3 { 0x5C } else { CHAR_INFO_SIZE };
@@ -146,10 +141,40 @@ impl Service for Database {
                 rsp.data.extend_from_slice(&defaults()[i]);
             }
             5 => rsp.data.extend_from_slice(&req.data[..CHAR_INFO_SIZE.min(req.data.len())]),
-            21 => return NOT_FOUND,
+            11 => rsp.push_u32(Self::find(&req.data).map_or(-1, |i| i as i32) as u32),
+            21 => match Self::find(&req.data) {
+                Some(i) => rsp.push_u32(i as u32),
+                None => return NOT_FOUND,
+            },
             22 => {}
             _ => return Stub(self.name()).call(req, rsp),
         }
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_entries_are_tagged_and_the_combined_flag_has_no_duplicates() {
+        let (database, source) = Database::listed(SOURCE_DATABASE);
+        assert_eq!(database.len(), DEFAULT_COUNT);
+        assert_eq!(source, ELEMENT_DATABASE);
+        assert_eq!(Database::listed(SOURCE_DEFAULT).1, ELEMENT_DEFAULT);
+        assert_eq!(Database::listed(SOURCE_DATABASE | SOURCE_DEFAULT), (database, ELEMENT_DATABASE));
+        assert!(Database::listed(0).0.is_empty());
+        let ids: std::collections::HashSet<_> = database.iter().map(|c| &c[..16]).collect();
+        assert_eq!(ids.len(), DEFAULT_COUNT);
+    }
+
+    #[test]
+    fn listed_miis_can_be_found_by_id() {
+        for (i, c) in Database::listed(SOURCE_DATABASE).0.iter().enumerate() {
+            assert_eq!(Database::find(c), Some(i));
+        }
+        assert_eq!(Database::find(&[0xFF; CHAR_INFO_SIZE]), None);
+        assert_eq!(Database::find(&[]), None);
     }
 }
