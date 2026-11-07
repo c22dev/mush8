@@ -47,6 +47,81 @@ fn release(g: i32) -> Option<Fd> {
     usize::try_from(g).ok().and_then(|i| FDS.lock().unwrap().get_mut(i).and_then(|e| e.take()))
 }
 
+const PARK_FOR: Duration = Duration::from_secs(5);
+const MAX_PARKED: usize = 8;
+
+static PARKED: Mutex<Vec<(u16, i32, Instant)>> = Mutex::new(Vec::new());
+
+fn drop_expired(parked: &mut Vec<(u16, i32, Instant)>) {
+    parked.retain(|&(_, fd, until)| {
+        let keep = until > Instant::now();
+        if !keep {
+            unsafe { libc::close(fd) };
+        }
+        keep
+    });
+}
+
+fn unconnected_udp_port(fd: i32) -> Option<u16> {
+    let mut ty: i32 = 0;
+    let mut len = 4 as libc::socklen_t;
+    if unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, &mut ty as *mut _ as *mut _, &mut len) } != 0 || ty != libc::SOCK_DGRAM {
+        return None;
+    }
+    let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    if unsafe { libc::getpeername(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut len) } == 0 {
+        return None;
+    }
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    if unsafe { libc::getsockname(fd, &mut ss as *mut _ as *mut libc::sockaddr, &mut len) } != 0 || ss.ss_family as i32 != libc::AF_INET {
+        return None;
+    }
+    let port = u16::from_be(unsafe { (*(&ss as *const _ as *const libc::sockaddr_in)).sin_port });
+    (port != 0).then_some(port)
+}
+
+fn park(fd: i32) -> bool {
+    crate::services::nextendo::enabled() && keep(fd)
+}
+
+fn unpark(fd: i32, ss: &libc::sockaddr_storage) -> bool {
+    crate::services::nextendo::enabled() && reclaim(fd, ss)
+}
+
+fn keep(fd: i32) -> bool {
+    let Some(port) = unconnected_udp_port(fd) else { return false };
+    let mut parked = PARKED.lock().unwrap();
+    drop_expired(&mut parked);
+    if let Some(i) = parked.iter().position(|p| p.0 == port) {
+        unsafe { libc::close(parked.remove(i).1) };
+    } else if parked.len() >= MAX_PARKED {
+        return false;
+    }
+    parked.push((port, fd, Instant::now() + PARK_FOR));
+    true
+}
+
+fn reclaim(fd: i32, ss: &libc::sockaddr_storage) -> bool {
+    if ss.ss_family as i32 != libc::AF_INET {
+        return false;
+    }
+    let port = u16::from_be(unsafe { (*(ss as *const _ as *const libc::sockaddr_in)).sin_port });
+    let mut parked = PARKED.lock().unwrap();
+    drop_expired(&mut parked);
+    let Some(i) = parked.iter().position(|p| p.0 == port) else { return false };
+    let (_, old, _) = parked.remove(i);
+    let nonblock = unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK;
+    let fl = unsafe { libc::fcntl(old, libc::F_GETFL) } & !libc::O_NONBLOCK;
+    unsafe { libc::fcntl(old, libc::F_SETFL, fl | nonblock) };
+    let ok = unsafe { libc::dup2(old, fd) } == fd;
+    unsafe { libc::close(old) };
+    if ok && trace() {
+        eprintln!("[bsd] fd {fd}: reusing the udp/{port} socket the game just closed");
+    }
+    ok
+}
+
 fn fd_isset(set: &libc::fd_set, fd: i32) -> bool {
     let words = unsafe { &*(set as *const _ as *const [u32; 32]) };
     (0..1024).contains(&fd) && words[fd as usize / 32] & (1 << (fd % 32)) != 0
@@ -152,9 +227,29 @@ fn emulate_shout(ss: &libc::sockaddr_storage) -> bool {
 
 fn read_udp(fd: i32, buf: &mut [u8], flags: i32) -> (i32, u32, libc::sockaddr_storage, libc::socklen_t) {
     let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    let r = res(unsafe { libc::recvfrom(fd, buf.as_mut_ptr() as *mut _, buf.len(), flags, &mut ss as *mut _ as *mut _, &mut len) });
-    (r.0, r.1, ss, if r.0 >= 0 { len } else { 0 })
+    loop {
+        let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        let n = unsafe { libc::recvfrom(fd, buf.as_mut_ptr() as *mut _, buf.len(), flags, &mut ss as *mut _ as *mut _, &mut len) };
+        if n < 0 && spurious_udp_reset(fd) {
+            let nonblocking = flags & libc::MSG_DONTWAIT != 0 || unsafe { libc::fcntl(fd, libc::F_GETFL) } & libc::O_NONBLOCK != 0;
+            if nonblocking {
+                return (-1, linux_errno(libc::EAGAIN), ss, 0);
+            }
+            continue;
+        }
+        let r = res(n as isize);
+        return (r.0, r.1, ss, if r.0 >= 0 { len } else { 0 });
+    }
+}
+
+fn spurious_udp_reset(fd: i32) -> bool {
+    let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if !matches!(e, libc::ECONNREFUSED | libc::ECONNRESET | libc::ENETRESET) || !crate::services::nextendo::enabled() {
+        return false;
+    }
+    let mut ty: i32 = 0;
+    let mut len = 4 as libc::socklen_t;
+    unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE, &mut ty as *mut _ as *mut _, &mut len) == 0 && ty == libc::SOCK_DGRAM }
 }
 
 const NX_O_NONBLOCK: i32 = 0x800;
@@ -436,7 +531,7 @@ impl Service for Bsd {
                         shout_map().lock().unwrap().remove(&fd);
                     }
                     res(if req.cmd == 13 {
-                        unsafe { libc::bind(fd, p, len) as isize }
+                        if unpark(fd, &ss) { 0 } else { unsafe { libc::bind(fd, p, len) as isize } }
                     } else {
                         crate::kernel::blocking(|| unsafe { libc::connect(fd, p, len) as isize })
                     })
@@ -506,7 +601,7 @@ impl Service for Bsd {
             26 => {
                 release(gfd);
                 shout_map().lock().unwrap().remove(&fd);
-                res(unsafe { libc::close(fd) } as isize)
+                if park(fd) { (0, 0) } else { res(unsafe { libc::close(fd) } as isize) }
             }
             27 => {
                 let d = unsafe { libc::dup(fd) };
@@ -771,6 +866,44 @@ mod entitlement {
             }
             CFRelease(task);
             ok
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn udp(port: u16) -> (i32, libc::sockaddr_storage) {
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        let mut ss: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let sin = unsafe { &mut *(&mut ss as *mut _ as *mut libc::sockaddr_in) };
+        sin.sin_len = 16;
+        sin.sin_family = libc::AF_INET as u8;
+        sin.sin_port = port.to_be();
+        sin.sin_addr.s_addr = u32::from(Ipv4Addr::LOCALHOST).to_be();
+        (fd, ss)
+    }
+
+    #[test]
+    fn a_rebound_udp_port_keeps_its_socket() {
+        let (first, ss) = udp(0);
+        assert_eq!(unsafe { libc::bind(first, &ss as *const _ as *const libc::sockaddr, 16) }, 0);
+        let port = unconnected_udp_port(first).unwrap();
+        assert!(keep(first));
+        let (second, ss) = udp(port);
+        assert!(reclaim(second, &ss));
+        assert_eq!(unconnected_udp_port(second), Some(port));
+        let (peer, _) = udp(0);
+        let sent = unsafe { libc::sendto(peer, b"hi".as_ptr().cast(), 2, 0, &ss as *const _ as *const libc::sockaddr, 16) };
+        assert_eq!(sent, 2);
+        let mut buf = [0u8; 4];
+        let got = unsafe { libc::recv(second, buf.as_mut_ptr().cast(), 4, 0) };
+        assert_eq!(&buf[..got as usize], b"hi");
+        assert!(!reclaim(second, &ss));
+        unsafe {
+            libc::close(second);
+            libc::close(peer);
         }
     }
 }
