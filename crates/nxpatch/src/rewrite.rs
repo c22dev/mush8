@@ -90,7 +90,7 @@ pub fn aspect_stores(module_id: &str) -> &'static [u64] {
 }
 
 const GAMES: &[Game] = &[
-    Game { module_id: MK8DX_401, keypage: 0x1368000, aspect_stores: &[0x3ccab8, 0x3cd25c, 0x3cd318] },
+    Game { module_id: MK8DX_401, keypage: 0x1368000, aspect_stores: &[0x3ccab8, 0x3cd25c, 0x3cd318, 0x3ca8a8] },
     Game { module_id: MK8DX_305, keypage: 0x1364000, aspect_stores: &[0x3ca958, 0x3cb0fc, 0x3cb1b8] },
 ];
 
