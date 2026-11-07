@@ -217,6 +217,7 @@ impl Service for StorageAccessor {
 }
 
 const APPLET_CONTROLLER: u32 = 0x0C;
+const APPLET_MII: u32 = 0x12;
 const APPLET_WEB: u32 = 0x13;
 const APPLET_OFFLINE_WEB: u32 = 0x17;
 
@@ -266,6 +267,7 @@ impl LibraryApplet {
         let input = self.input.lock().unwrap().clone();
         let out = match self.id {
             APPLET_CONTROLLER => Some(controller_applet(&input)),
+            APPLET_MII => Some(mii_applet(&input)),
             APPLET_WEB | APPLET_OFFLINE_WEB => Some(web_applet(&input)),
             APPLET_ERROR => {
                 for (i, d) in input.iter().enumerate() {
@@ -312,6 +314,34 @@ impl Service for LibraryApplet {
             _ => return Stub(self.name()).call(req, rsp),
         }
         0
+    }
+}
+
+fn mii_applet(input: &[Vec<u8>]) -> Vec<u8> {
+    // MiiEdit must return an output storage even when canceled. No output
+    // makes nn::mii::StartImpl abort before the game can handle cancellation.
+    let mode = input.iter().find(|d| d.len() == 0x100)
+        .and_then(|d| d.get(4..8))
+        .map(|d| u32::from_le_bytes(d.try_into().unwrap()));
+    let mut out = vec![0u8; if matches!(mode, Some(4 | 5)) { 0x80 } else { 0x20 }];
+    out[..4].copy_from_slice(&1u32.to_le_bytes());
+    eprintln!("[am] Mii editor unavailable: returning canceled (mode {mode:?})");
+    out
+}
+
+#[cfg(test)]
+mod mii_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_editor_returns_a_complete_canceled_output() {
+        for (mode, size) in [(1u32, 0x20), (4, 0x80), (5, 0x80)] {
+            let mut arg = vec![0u8; 0x100];
+            arg[4..8].copy_from_slice(&mode.to_le_bytes());
+            let out = mii_applet(&[vec![0; 0x20], arg]);
+            assert_eq!(out.len(), size);
+            assert_eq!(&out[..4], &1u32.to_le_bytes());
+        }
     }
 }
 

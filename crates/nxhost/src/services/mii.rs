@@ -95,8 +95,24 @@ struct Database;
 
 impl Database {
     fn listed(flag: u32) -> Vec<[u8; CHAR_INFO_SIZE]> {
-        let _ = SOURCE_DATABASE;
-        if flag & SOURCE_DEFAULT != 0 { defaults().clone() } else { Vec::new() }
+        // Until a Mii editor/database is implemented, expose the built-in Miis
+        // as database entries too. An empty database sends MK8 into AppendMii.
+        if flag & (SOURCE_DATABASE | SOURCE_DEFAULT) != 0 { defaults().clone() } else { Vec::new() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn database_has_selectable_miis_without_duplicate_combined_sources() {
+        let database = Database::listed(SOURCE_DATABASE);
+        assert_eq!(database.len(), DEFAULT_COUNT);
+        assert_eq!(Database::listed(SOURCE_DATABASE | SOURCE_DEFAULT), database);
+        assert!(Database::listed(0).is_empty());
+        let ids: std::collections::HashSet<_> = database.iter().map(|c| &c[..16]).collect();
+        assert_eq!(ids.len(), DEFAULT_COUNT);
     }
 }
 
