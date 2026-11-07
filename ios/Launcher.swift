@@ -492,7 +492,9 @@ struct LauncherView: View {
 
     @ViewBuilder var playButton: some View {
         let button = Button(action: start) {
-            Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220)
+            Text("Play").font(.title3.weight(.semibold)).opacity(launching ? 0 : 1)
+                .overlay { if launching { ProgressView().tint(.white) } }
+                .frame(maxWidth: 220)
         }
         .controlSize(.large)
         #if compiler(>=6.2)

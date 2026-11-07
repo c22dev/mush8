@@ -428,7 +428,11 @@ struct LauncherView: View {
                 ProgressView().controlSize(.small)
                 Text(prep.line).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
             } else if ready {
-                Button(action: play) { Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: .infinity) }
+                Button(action: play) {
+                    Text("Play").font(.title3.weight(.semibold)).opacity(launching ? 0 : 1)
+                        .overlay { if launching { ProgressView().controlSize(.small).tint(.white) } }
+                        .frame(maxWidth: .infinity)
+                }
                     .controlSize(.large).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             } else {
                 Button(action: prepare) { Text("Prepare game data").frame(maxWidth: .infinity) }
