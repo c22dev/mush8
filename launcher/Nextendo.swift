@@ -95,7 +95,11 @@ enum Nextendo {
                 self = .unknown("HTTP \(status)" + ((json["error"] as? String).map { ": \($0)" } ?? ""))
                 return
             }
-            self = json["allow"] as? Bool == true ? .allowed : .refused(json["reason"] as? String ?? "")
+            switch json["allow"] as? Bool {
+            case true?: self = .allowed
+            case false?: self = .refused(json["reason"] as? String ?? "")
+            case nil: self = .unknown("HTTP 200 without an answer")
+            }
         }
 
         var log: String {
