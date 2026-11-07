@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn traces_a_websocket_login_and_rejection() {
+    fn decodes_a_websocket_login_request() {
         let mut body = Vec::new();
         let user = b"1800000042\0";
         body.extend_from_slice(&(user.len() as u16).to_le_bytes());
