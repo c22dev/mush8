@@ -556,11 +556,13 @@ struct LauncherView: View {
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
                 let gate = await Nextendo.onlineGate(login.token)
                 setenv("NX_NEXTENDO_GATE", gate.log, 1)
-                if let problem = gate.problem, shownRefusal != problem {
-                    shownRefusal = problem
+                let refusal = gate.problem.map { "\(login.pid) \($0)" }
+                if let problem = gate.problem, shownRefusal != refusal {
+                    shownRefusal = refusal
                     self.error = problem + " Tap Play again to start anyway: online play won't work until then."
                     return
                 }
+                shownRefusal = nil
                 network.stop()
                 play()
             } catch {
