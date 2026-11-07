@@ -20,7 +20,7 @@ fn profile_base(out: &mut Vec<u8>) {
     out.extend_from_slice(&n);
 }
 
-fn nickname() -> String {
+pub(crate) fn nickname() -> String {
     let set = std::env::var("NX_NICKNAME").unwrap_or_default();
     let set = set.trim();
     let name = if set.is_empty() { NICKNAME } else { set };

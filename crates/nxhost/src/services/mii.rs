@@ -1,6 +1,7 @@
 // Mush8 - mii.rs
 // Constantin Clerc (c22dev) - 0.1
 use crate::ipc::{Request, Response, Service, Stub, write_buffer};
+use crate::services::account::nickname;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
@@ -15,6 +16,7 @@ const SOURCE_DEFAULT: u32 = 2;
 const ELEMENT_DATABASE: u32 = 0;
 const ELEMENT_DEFAULT: u32 = 1;
 const NOT_FOUND: u32 = 126 | 1 << 9;
+const NAME_UNITS: usize = 10;
 
 pub static VERIFY: OnceLock<u64> = OnceLock::new();
 
@@ -154,6 +156,27 @@ fn defaults() -> &'static Vec<[u8; CHAR_INFO_SIZE]> {
     })
 }
 
+fn renamed(c: &[u8; CHAR_INFO_SIZE], name: &str) -> [u8; CHAR_INFO_SIZE] {
+    let mut c = *c;
+    let mut units = Vec::new();
+    for ch in name.chars() {
+        let mut buf = [0u16; 2];
+        let encoded = ch.encode_utf16(&mut buf);
+        if units.len() + encoded.len() > NAME_UNITS {
+            break;
+        }
+        units.extend_from_slice(encoded);
+    }
+    if units.is_empty() {
+        return c;
+    }
+    c[f::NAME..f::NAME + 2 * (NAME_UNITS + 1)].fill(0);
+    for (i, u) in units.iter().enumerate() {
+        c[f::NAME + 2 * i..f::NAME + 2 * i + 2].copy_from_slice(&u.to_le_bytes());
+    }
+    c
+}
+
 pub struct MiiService;
 
 impl Service for MiiService {
@@ -203,9 +226,10 @@ impl Service for Database {
             2 => rsp.push_u32(Self::listed(req.u32(0)).len() as u32),
             3 | 4 => {
                 let list = Self::listed(req.u32(0));
+                let name = nickname();
                 let mut out = Vec::new();
                 for &(c, source) in &list {
-                    out.extend_from_slice(c);
+                    out.extend_from_slice(&renamed(c, &name));
                     if req.cmd == 3 {
                         out.extend_from_slice(&source.to_le_bytes());
                     }
@@ -215,15 +239,15 @@ impl Service for Database {
             }
             6 => {
                 let gender = req.u32(4);
-                let c = defaults()[if gender == 1 { 1 } else { 0 }];
-                rsp.data.extend_from_slice(&c);
+                let c = &defaults()[if gender == 1 { 1 } else { 0 }];
+                rsp.data.extend_from_slice(&renamed(c, &nickname()));
             }
             7 => {
                 let i = (req.u32(0) as usize).min(DEFAULT_COUNT - 1);
-                rsp.data.extend_from_slice(&defaults()[i]);
+                rsp.data.extend_from_slice(&renamed(&defaults()[i], &nickname()));
             }
             5 => match Self::find(&req.data) {
-                Some(i) if req.u32(CHAR_INFO_SIZE) & SOURCE_DATABASE != 0 => rsp.data.extend_from_slice(&Self::stored()[i]),
+                Some(i) if req.u32(CHAR_INFO_SIZE) & SOURCE_DATABASE != 0 => rsp.data.extend_from_slice(&renamed(&Self::stored()[i], &nickname())),
                 _ => rsp.data.extend_from_slice(&req.data[..CHAR_INFO_SIZE.min(req.data.len())]),
             },
             11 => rsp.push_u32(Self::find(&req.data).map_or(-1, |i| i as i32) as u32),
@@ -253,6 +277,26 @@ mod tests {
         assert!(Database::listed(0).is_empty());
         let ids: std::collections::HashSet<_> = listed.iter().map(|(c, _)| &c[..16]).collect();
         assert_eq!(ids.len(), DEFAULT_COUNT);
+    }
+
+    fn name_of(c: &[u8; CHAR_INFO_SIZE]) -> String {
+        let units: Vec<u16> = c[f::NAME..f::NAME + 2 * NAME_UNITS].chunks(2).map(|b| u16::from_le_bytes([b[0], b[1]])).take_while(|&u| u != 0).collect();
+        String::from_utf16(&units).unwrap()
+    }
+
+    #[test]
+    fn player_name_replaces_the_mii_name() {
+        let mut mii = defaults()[0];
+        for (i, ch) in "Mii Studio".encode_utf16().enumerate() {
+            mii[f::NAME + 2 * i..f::NAME + 2 * i + 2].copy_from_slice(&ch.to_le_bytes());
+        }
+        let short = renamed(&mii, "c22");
+        assert_eq!(name_of(&short), "c22");
+        assert_eq!(short[..f::NAME], mii[..f::NAME]);
+        assert_eq!(short[f::NAME + 2 * (NAME_UNITS + 1)..], mii[f::NAME + 2 * (NAME_UNITS + 1)..]);
+        assert_eq!(name_of(&renamed(&mii, "abcdefghijkl")), "abcdefghij");
+        assert_eq!(name_of(&renamed(&mii, "abcdefghi🇨🇭")), "abcdefghi");
+        assert_eq!(name_of(&renamed(&mii, "")), "Mii Studio");
     }
 
     #[test]
