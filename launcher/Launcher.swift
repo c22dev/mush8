@@ -415,6 +415,7 @@ struct LauncherView: View {
     @State private var showMods = false
     @State private var mods: [Mod] = []
     @State private var miiCount = 0
+    @State private var miiError: String?
 
     var body: some View {
         let _ = tick
@@ -557,13 +558,15 @@ struct LauncherView: View {
                 Spacer()
                 if miiCount > 0 {
                     Button("Remove") {
-                        do { try removeMiis(in: s.folderURL) } catch { launchError = error.localizedDescription }
+                        miiError = nil
+                        do { try removeMiis(in: s.folderURL) } catch { miiError = error.localizedDescription }
                         tick += 1
                     }
                 }
                 Button("Import…", action: chooseMiis)
             }
             .disabled(s.folder.isEmpty || prep.running)
+            if let miiError { Text(miiError).foregroundStyle(.red).font(.callout) }
         } header: {
             Text("Player")
         } footer: {
@@ -701,8 +704,8 @@ struct LauncherView: View {
         panel.allowsMultipleSelection = true
         panel.message = "Choose a MiiDatabase.dat or Mii files"
         guard panel.runModal() == .OK else { return }
-        launchError = nil
-        do { try importMiis(panel.urls, into: s.folderURL) } catch { launchError = error.localizedDescription }
+        miiError = nil
+        do { try importMiis(panel.urls, into: s.folderURL) } catch { miiError = error.localizedDescription }
         tick += 1
     }
 
