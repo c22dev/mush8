@@ -134,7 +134,7 @@ const RULES: &[Rule] = &[
     Rule { layout: "mn_BattleSlct_00", panes: &["P_Capture_00"], op: Op::Fit },
     Rule { layout: "mn_GrprClassSlct_00", panes: &["P_Capture_00"], op: Op::Fit },
     Rule { layout: "bt_TitleLoading_00", panes: &["N_CheckBG_00"], op: Op::Cover },
-    Rule { layout: "cm_LoadWin_00", panes: &["N_All_00"], op: Op::Cover },
+    Rule { layout: "cm_LoadWin_00", panes: &["P_Bar_00", "P_Line_00"], op: Op::Fill },
     Rule {
         layout: "mn_Page_Present_Parts",
         panes: &[
@@ -496,6 +496,29 @@ mod tests {
         let hud = l.pane("L_BtTimer_Ml").unwrap();
         close(hud.scale, [k, k]);
         close(hud.translate, [518.0 * s * k + 640.0 * s * (1.0 - k), 305.0 * k + 360.0 * (1.0 - k)]);
+    }
+
+    #[test]
+    fn loading_bar_reaches_the_edges_without_moving_down() {
+        let mut d = layout(&[
+            (b"pan1", "RootPane", [0.0, 0.0], [1280.0, 720.0]),
+            (b"pic1", "P_Bar_00", [0.0, -314.0], [1280.0, 120.0]),
+            (b"pic1", "P_Line_00", [0.0, 59.5], [1280.0, 1.0]),
+            (b"txt1", "T_Text_00", [-2.0, 14.0], [1000.0, 76.0]),
+        ]);
+        let ratio = 2.17;
+        let plan = Plan::new(Some(Target { ratio, hud_ratio: ratio }), 1.0).unwrap();
+        let mut l = Layout::parse(&mut d).unwrap();
+        let edits = plan.edits("cm_LoadWin_00", &l);
+        assert!(apply(&edits, &mut l));
+        let l = Layout::parse(&mut d).unwrap();
+        let s = (ratio / NATIVE) as f32;
+        let close = |a: [f32; 2], b: [f32; 2]| assert!((a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3, "{a:?} != {b:?}");
+        close(l.pane("RootPane").unwrap().scale, [1.0 / s, 1.0]);
+        close(l.pane("P_Bar_00").unwrap().scale, [s, 1.0]);
+        close(l.pane("P_Line_00").unwrap().scale, [s, 1.0]);
+        close(l.pane("T_Text_00").unwrap().scale, [1.0, 1.0]);
+        close(l.pane("P_Bar_00").unwrap().translate, [0.0, -314.0]);
     }
 
     #[test]
