@@ -4,7 +4,7 @@
 // id token, the nx2 token's signature, tickets or session keys: only their shape,
 // and the fields that tell which server check fails.
 use crate::services::nextendo;
-use std::collections::HashSet;
+use std::collections::VecDeque;
 
 const TYPE_SYN: u16 = 0;
 const TYPE_CONNECT: u16 = 1;
@@ -13,6 +13,8 @@ const TYPE_DISCONNECT: u16 = 3;
 const FLAG_ACK: u16 = 1;
 const PROTO_AUTH: u16 = 0x0a;
 const MAX_BUFFER: usize = 1 << 20;
+const SEEN_WINDOW: usize = 1024;
+const HTTP_HEADS: [&[u8]; 2] = [b"GET ", b"HTTP/"];
 
 pub fn enabled() -> bool {
     nextendo::enabled() && std::env::var("NX_NEXTENDO_TRACE").is_ok_and(|v| v.trim() == "1")
@@ -48,8 +50,10 @@ struct Side {
     raw: Vec<u8>,
     lite: Vec<u8>,
     message: Vec<u8>,
-    seen: HashSet<u16>,
+    seen: VecDeque<PacketId>,
 }
+
+type PacketId = (u8, u8, u8, u16);
 
 fn arrow(out: bool) -> &'static str {
     if out { "->" } else { "<-" }
@@ -71,15 +75,21 @@ impl Side {
             return;
         }
         if self.framing == Framing::Unknown {
-            if self.raw.starts_with(b"GET ") || self.raw.starts_with(b"HTTP/") {
+            if HTTP_HEADS.iter().any(|h| self.raw.starts_with(h)) {
                 let Some(end) = find(&self.raw, b"\r\n\r\n") else { return };
-                log_http(out, &String::from_utf8_lossy(&self.raw[..end]));
+                let head = String::from_utf8_lossy(&self.raw[..end]).into_owned();
+                log_http(out, &head);
                 self.raw.drain(..end + 4);
+                if !is_websocket_upgrade(&head) {
+                    self.raw.clear();
+                    self.framing = Framing::Off;
+                    return;
+                }
                 self.framing = Framing::WebSocket;
             } else if self.raw.first() == Some(&0x80) {
                 eprintln!("[nextrace] {} raw PRUDP lite stream", arrow(out));
                 self.framing = Framing::Raw;
-            } else if self.raw.len() >= 4 {
+            } else if self.raw.len() >= 4 && !HTTP_HEADS.iter().any(|h| h.starts_with(&self.raw)) {
                 let head: String = self.raw.iter().take(8).map(|b| format!("{b:02x}")).collect();
                 eprintln!("[nextrace] {} unknown framing ({head}), trace stopped", arrow(out));
                 self.framing = Framing::Off;
@@ -123,6 +133,7 @@ impl Side {
             if self.lite.len() < total {
                 return;
             }
+            let (stream, source, destination) = (self.lite[4], self.lite[5], self.lite[6]);
             let fragment = self.lite[7];
             let type_flags = u16::from_le_bytes([self.lite[8], self.lite[9]]);
             let id = u16::from_le_bytes([self.lite[10], self.lite[11]]);
@@ -135,7 +146,7 @@ impl Side {
                 TYPE_CONNECT => eprintln!("[nextrace] {} CONNECT{ack}", arrow(out)),
                 TYPE_DISCONNECT => eprintln!("[nextrace] {} DISCONNECT{ack}", arrow(out)),
                 TYPE_DATA if flags & FLAG_ACK == 0 && !payload.is_empty() => {
-                    if !self.seen.insert(id) {
+                    if !self.first_time((stream, source, destination, id)) {
                         continue;
                     }
                     self.message.extend_from_slice(&payload);
@@ -148,11 +159,36 @@ impl Side {
             }
         }
     }
+
+    fn first_time(&mut self, id: PacketId) -> bool {
+        if self.seen.contains(&id) {
+            return false;
+        }
+        if self.seen.len() == SEEN_WINDOW {
+            self.seen.pop_front();
+        }
+        self.seen.push_back(id);
+        true
+    }
+}
+
+fn is_websocket_upgrade(head: &str) -> bool {
+    let head = head.to_ascii_lowercase();
+    if head.starts_with("http/") {
+        return head.split_whitespace().nth(1) == Some("101");
+    }
+    head.contains("\nupgrade:") || head.contains("\nsec-websocket-key:")
+}
+
+fn without_query(line: &str) -> String {
+    let Some((path, rest)) = line.split_once('?') else { return line.to_string() };
+    let version = rest.rsplit_once(' ').map_or("", |(_, v)| v);
+    format!("{path}?<query> {version}")
 }
 
 fn log_http(out: bool, head: &str) {
     let mut lines = head.lines();
-    let first = lines.next().unwrap_or_default();
+    let first = without_query(lines.next().unwrap_or_default());
     let keep = ["host", "upgrade", "connection", "sec-websocket-protocol", "sec-websocket-version"];
     let headers: Vec<String> = lines
         .filter_map(|l| l.split_once(':'))
@@ -229,7 +265,8 @@ pub fn result_name(code: u32) -> &'static str {
     }
     match code & !0x8000_0000 {
         0x0001_0001 => "Core::Unknown",
-        0x0001_000b => "Core::InvalidArgument",
+        0x0001_000a => "Core::InvalidArgument",
+        0x0001_000b => "Core::Timeout",
         0x0068_0001 => "Authentication::NASAuthenticateError",
         0x0068_0002 => "Authentication::TokenParseError",
         0x0068_0006 => "Authentication::TokenExpired",
@@ -284,7 +321,14 @@ fn rmc(out: bool, m: &[u8]) {
     }
 }
 
+fn is_login(method: u32) -> bool {
+    matches!(method, 1 | 2 | 6)
+}
+
 fn auth_request(method: u32, body: &[u8]) {
+    if !is_login(method) {
+        return;
+    }
     let mut r = Reader::new(body);
     let username = match method {
         1 | 2 => r.string(),
@@ -328,6 +372,9 @@ fn auth_request(method: u32, body: &[u8]) {
 }
 
 fn auth_response(method: u32, body: &[u8]) {
+    if !is_login(method) {
+        return;
+    }
     let mut r = Reader::new(body);
     if method == 6 {
         let _ = (r.u8(), r.u32());
@@ -338,7 +385,8 @@ fn auth_response(method: u32, body: &[u8]) {
     let (Some(retval), Some(pid)) = (r.u32(), r.u64()) else { return };
     let verdict = if retval & 0x8000_0000 != 0 { "REJECTED" } else { "accepted" };
     eprintln!("[nextrace]    login {verdict}: retval {retval:#010x} {}, PID is the account {}", result_name(retval), pid == nextendo::pid() && pid != 0);
-    let strings = nex_strings(r.rest());
+    let after_ticket = r.u32().and_then(|n| r.take(n as usize)).map_or(&[][..], |_| r.rest());
+    let strings = nex_strings(after_ticket);
     if !strings.is_empty() {
         eprintln!("[nextrace]    response strings: {strings:?}");
     }
@@ -370,7 +418,7 @@ fn is_jwt_byte(b: u8) -> bool {
     b == b'.' || b == b'-' || b == b'_' || b.is_ascii_alphanumeric()
 }
 
-fn now() -> u64 {
+pub fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -462,8 +510,9 @@ pub fn describe_nnex(token: &str, now: u64, pid: u64) -> String {
     let Some(rest) = token.strip_prefix("nx2.") else { return format!("not an nx2 token ({} chars)", token.len()) };
     let Some((payload, mac)) = rest.split_once('.') else { return "nx2 token without a signature".into() };
     let Some(raw) = base64url_decode(payload).and_then(|p| String::from_utf8(p).ok()) else { return "nx2 payload is not base64url text".into() };
-    let fields: Vec<&str> = raw.splitn(3, '.').collect();
-    let [p, user, exp] = fields[..] else { return format!("nx2 payload has {} fields, expected pid.username.expiry", fields.len()) };
+    let Some((p, (user, exp))) = raw.split_once('.').and_then(|(p, tail)| Some((p, tail.rsplit_once('.')?))) else {
+        return format!("nx2 payload has {} fields, expected pid.username.expiry", raw.split('.').count());
+    };
     let pid_ok = p.parse::<u64>().ok() == Some(pid) && pid != 0;
     let expiry = match exp.parse::<i64>() {
         Ok(e) => format!("{:+.1} days", (e - now as i64) as f64 / 86400.0),
@@ -576,9 +625,70 @@ mod tests {
         assert_eq!(t.sent.framing, Framing::WebSocket);
         t.sent(&ws[5..]);
         assert!(t.sent.raw.is_empty() && t.sent.lite.is_empty());
-        assert!(t.sent.seen.contains(&1));
+        assert!(t.sent.seen.contains(&(0x11, 1, 1, 1)));
         assert_eq!(result_name(0x8068_0007), "Authentication::ValidationFailed");
         assert_eq!(result_name(0x0001_0001), "success");
+        assert_eq!(result_name(0x8001_000a), "Core::InvalidArgument");
+        assert_eq!(result_name(0x8001_000b), "Core::Timeout");
+    }
+
+    #[test]
+    fn split_http_head_keeps_the_trace_running() {
+        let mut t = Trace::default();
+        t.received(b"HTTP");
+        assert_eq!(t.received.framing, Framing::Unknown);
+        t.received(b"/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n");
+        assert_eq!(t.received.framing, Framing::WebSocket);
+    }
+
+    #[test]
+    fn unknown_bytes_still_stop_the_trace() {
+        let mut t = Trace::default();
+        t.received(b"nope");
+        assert_eq!(t.received.framing, Framing::Off);
+    }
+
+    #[test]
+    fn only_a_real_upgrade_switches_to_websocket() {
+        for head in [&b"HTTP/1.1 403 Forbidden\r\n\r\nHello"[..], b"HTTP/1.1 200 OK\r\n\r\nHello", b"GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n"] {
+            let mut t = Trace::default();
+            t.received(head);
+            assert_eq!(t.received.framing, Framing::Off, "{}", String::from_utf8_lossy(head));
+            assert!(t.received.raw.is_empty() && t.received.lite.is_empty());
+        }
+    }
+
+    #[test]
+    fn query_strings_are_not_logged() {
+        assert_eq!(without_query("GET /ws?token=secret HTTP/1.1"), "GET /ws?<query> HTTP/1.1");
+        assert_eq!(without_query("GET /ws HTTP/1.1"), "GET /ws HTTP/1.1");
+    }
+
+    #[test]
+    fn retransmits_are_dropped_per_stream_and_ids_can_wrap() {
+        let mut s = Side::default();
+        assert!(s.first_time((0x11, 1, 1, 7)));
+        assert!(!s.first_time((0x11, 1, 1, 7)));
+        assert!(s.first_time((0x11, 1, 2, 7)));
+        for id in 0..SEEN_WINDOW as u16 {
+            s.first_time((0x11, 1, 1, 1000 + id));
+        }
+        assert_eq!(s.seen.len(), SEEN_WINDOW);
+        assert!(s.first_time((0x11, 1, 1, 7)));
+    }
+
+    #[test]
+    fn only_login_methods_are_parsed_as_logins() {
+        assert!(is_login(1) && is_login(2) && is_login(6));
+        assert!(!is_login(3) && !is_login(4) && !is_login(5));
+    }
+
+    #[test]
+    fn nnex_expiry_survives_a_dotted_username() {
+        let tok = format!("nx2.{}.{}", b64(b"1800000042.john.doe.1000086400"), b64(&[7u8; 32]));
+        let d = describe_nnex(&tok, 1_000_000_000, 1800000042);
+        assert!(d.contains("username 8 chars") && d.contains("+1.0 days"), "{d}");
+        assert!(describe_nnex(&format!("nx2.{}.x", b64(b"1800000042.1000086400")), 0, 0).contains("2 fields"));
     }
 
     #[test]
