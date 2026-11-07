@@ -11,7 +11,9 @@ let countryCodes: [String] = Locale.Region.isoRegions.map(\.identifier)
 func countryName(_ code: String) -> String { Locale.current.localizedString(forRegionCode: code) ?? code }
 
 func playerNickname(nextendo: Bool, source: String, custom: String, nextendoName: String) -> String {
-    nextendo && source != "custom" ? nextendoName : custom.trimmingCharacters(in: .whitespaces)
+    let custom = custom.trimmingCharacters(in: .whitespaces)
+    if nextendo && source != "custom" { return nextendoName }
+    return custom.isEmpty ? nextendoName : custom
 }
 
 func playerCountry(nextendo: Bool, country: String) -> String { nextendo ? country : "" }
@@ -40,7 +42,7 @@ struct PlayerIdentity: View {
             }
         }
         if !nextendo || nameSource == "custom" {
-            TextField(nextendo ? "Name" : "Player name", text: $name, prompt: Text("Player"))
+            TextField(nextendo ? "Name" : "Player name", text: $name, prompt: Text(nextendoName.isEmpty ? "Player" : nextendoName))
                 .onChange(of: name) { name = limitedNickname(name) }
         }
         if nextendo {
