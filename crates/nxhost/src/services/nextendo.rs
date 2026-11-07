@@ -130,7 +130,9 @@ pub fn id_token() -> String {
     }
     let payload = format!("{{{}}}", claims.join(","));
     let token = format!("{}.{}.{}", base64url(header.as_bytes()), base64url(payload.as_bytes()), base64url(&random::<256>()));
-    diag_once(&format!("id token {exp}"), || format!("[nextendo] new id token: {}", crate::services::nextrace::describe_jwt(&token, now, pid())));
+    if crate::services::nextrace::enabled() {
+        eprintln!("[nextendo] new id token: {}", crate::services::nextrace::describe_jwt(&token, now, pid()));
+    }
     *cached = Some((exp, token.clone()));
     token
 }
@@ -150,14 +152,13 @@ pub fn log_start() {
     if !enabled() {
         return;
     }
-    match (pid(), token().is_empty()) {
+    let nex = token();
+    match (pid(), nex.is_empty()) {
         (0, _) | (_, true) => eprintln!("[nextendo] not signed in : sign in from the launcher to play online"),
         (pid, false) => eprintln!("[nextendo] signed in, pid {pid}"),
     }
-    let nex = token();
     if !nex.is_empty() {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        eprintln!("[nextendo] game token: {}", crate::services::nextrace::describe_nnex(&nex, now, pid()));
+        eprintln!("[nextendo] game token: {}", crate::services::nextrace::describe_nnex(&nex, crate::services::nextrace::now(), pid()));
     }
     if let Ok(gate) = std::env::var("NX_NEXTENDO_GATE") {
         eprintln!("[nextendo] account online gate (/api/online-status): {gate}");
