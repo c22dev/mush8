@@ -405,8 +405,15 @@ struct LauncherView: View {
             .frame(maxWidth: .infinity)
         }
         .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .folder], allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result { files.copy(urls) }
+        .fileImporter(isPresented: $picking, allowedContentTypes: pickingMiis ? [.data] : [.data, .folder], allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            if pickingMiis {
+                miiError = nil
+                do { try importMiis(urls, into: docsURL) } catch { miiError = error.localizedDescription }
+                miiCount = installedMiiCount(in: docsURL)
+            } else {
+                files.copy(urls)
+            }
         }
         .fullScreenCover(isPresented: $browsingMods, onDismiss: { mods = installedMods(in: docsURL) }) {
             ModBrowserView(folder: docsURL) { name in
@@ -469,7 +476,10 @@ struct LauncherView: View {
         Section {
             PlayerIdentity(nextendo: s.network == "nextendo", nextendoName: s.nextendoName,
                            nameSource: $s.nicknameSource, name: $s.nickname, country: $s.country)
-            Button("Import Miis…") { pickingMiis = true }
+            Button("Import Miis…") {
+                pickingMiis = true
+                picking = true
+            }
                 .disabled(files.copying != nil)
             if miiCount > 0 {
                 Button("Remove custom Miis", role: .destructive) {
@@ -483,12 +493,6 @@ struct LauncherView: View {
             Text(miiCount == 0 ? "Player" : "Player · \(miiCount) Miis")
         } footer: {
             Text("The name is shown on your time trial ghosts and online, 10 characters max. The country sets your flag online with Nextendo. Miis: a MiiDatabase.dat from your Switch, or .charinfo / .storedata Mii files. They show up next to the default Miis in the game")
-        }
-        .fileImporter(isPresented: $pickingMiis, allowedContentTypes: [.data], allowsMultipleSelection: true) { result in
-            guard case .success(let urls) = result else { return }
-            miiError = nil
-            do { try importMiis(urls, into: docsURL) } catch { miiError = error.localizedDescription }
-            miiCount = installedMiiCount(in: docsURL)
         }
     }
 
@@ -522,7 +526,10 @@ struct LauncherView: View {
                 ProgressView()
                 Text("Copying \(name)…").font(.callout)
             } else {
-                Button("Import game files") { picking = true }
+                Button("Import game files") {
+                    pickingMiis = false
+                    picking = true
+                }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                 Text("Import prod.keys, the base game and update .nsp files and the Firmware folder (+DLC)/put them in On My iPhone")
