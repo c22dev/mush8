@@ -137,7 +137,6 @@ pub fn id_token() -> String {
     token
 }
 
-/// Logs a diagnostic line once per key, when NX_NEXTENDO_TRACE=1.
 pub fn diag_once(key: &str, line: impl FnOnce() -> String) {
     static SEEN: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
     if !crate::services::nextrace::enabled() {
