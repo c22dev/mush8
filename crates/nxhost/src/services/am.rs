@@ -318,31 +318,16 @@ impl Service for LibraryApplet {
 }
 
 fn mii_applet(input: &[Vec<u8>]) -> Vec<u8> {
-    // MiiEdit must return an output storage even when canceled. No output
-    // makes nn::mii::StartImpl abort before the game can handle cancellation.
-    let mode = input.iter().find(|d| d.len() == 0x100)
-        .and_then(|d| d.get(4..8))
+    let mode = input.iter().skip(1).find_map(|d| d.get(4..8))
         .map(|d| u32::from_le_bytes(d.try_into().unwrap()));
-    let mut out = vec![0u8; if matches!(mode, Some(4 | 5)) { 0x80 } else { 0x20 }];
+    let char_info = matches!(mode, Some(4 | 5));
+    let mut out = vec![0u8; if char_info { 0x80 } else { 0x20 }];
     out[..4].copy_from_slice(&1u32.to_le_bytes());
+    if !char_info {
+        out[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+    }
     eprintln!("[am] Mii editor unavailable: returning canceled (mode {mode:?})");
     out
-}
-
-#[cfg(test)]
-mod mii_tests {
-    use super::*;
-
-    #[test]
-    fn unsupported_editor_returns_a_complete_canceled_output() {
-        for (mode, size) in [(1u32, 0x20), (4, 0x80), (5, 0x80)] {
-            let mut arg = vec![0u8; 0x100];
-            arg[4..8].copy_from_slice(&mode.to_le_bytes());
-            let out = mii_applet(&[vec![0; 0x20], arg]);
-            assert_eq!(out.len(), size);
-            assert_eq!(&out[..4], &1u32.to_le_bytes());
-        }
-    }
 }
 
 fn controller_applet(input: &[Vec<u8>]) -> Vec<u8> {
@@ -391,4 +376,27 @@ fn web_applet(input: &[Vec<u8>]) -> Vec<u8> {
     out[8..8 + n].copy_from_slice(&url.as_bytes()[..n]);
     out[0x1008..0x1010].copy_from_slice(&(n as u64).to_le_bytes());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_editor_returns_a_complete_canceled_output() {
+        for (mode, input_size, size) in [(1u32, 0x100, 0x20), (4, 0x100, 0x80), (5, 0x100, 0x80), (4, 0x88, 0x80)] {
+            let mut arg = vec![0u8; input_size];
+            arg[4..8].copy_from_slice(&mode.to_le_bytes());
+            let out = mii_applet(&[vec![0; 0x20], arg]);
+            assert_eq!(out.len(), size);
+            assert_eq!(&out[..4], &1u32.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn canceled_output_has_no_valid_index() {
+        let out = mii_applet(&[]);
+        assert_eq!(out.len(), 0x20);
+        assert_eq!(&out[4..8], &(-1i32).to_le_bytes());
+    }
 }
