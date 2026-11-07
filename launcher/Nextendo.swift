@@ -19,6 +19,7 @@ enum Nextendo {
     static let authorize = URL(string: "https://nextendo.network/oauth/authorize")!
     static let tokenURL = URL(string: "https://nextendo.network/api/oauth/token")!
     static let nexTokenURL = URL(string: "https://nextendo.network/api/nex-token")!
+    static let onlineStatusURL = URL(string: "https://nextendo.network/api/online-status")!
     static let callbackPort: UInt16 = 47823
 
     struct Failure: LocalizedError {
@@ -82,6 +83,57 @@ enum Nextendo {
             throw Failure("Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account")
         }
         return NextendoLogin(pid: pid, name: json["username"] as? String ?? "", token: nex)
+    }
+
+    enum Gate: Equatable {
+        case allowed
+        case refused(String)
+        case unknown(String)
+
+        init(status: Int, json: [String: Any]) {
+            guard status == 200 else {
+                self = .unknown("HTTP \(status)" + ((json["error"] as? String).map { ": \($0)" } ?? ""))
+                return
+            }
+            self = json["allow"] as? Bool == true ? .allowed : .refused(json["reason"] as? String ?? "")
+        }
+
+        var log: String {
+            switch self {
+            case .allowed: "allowed"
+            case .refused(let reason): "refused (\(reason.isEmpty ? "no reason given" : reason))"
+            case .unknown(let detail): "not checked (\(detail))"
+            }
+        }
+
+        /// What to tell the player when Nextendo refuses online play.
+        var problem: String? {
+            guard case .refused(let reason) = self else { return nil }
+            let why = switch reason {
+            case "discord_unlinked": "this account isn't linked to Discord. Open your account page on nextendo.network and use \"link on Discord\""
+            case "unverified": "this account's e-mail address isn't confirmed. Confirm it from the e-mail Nextendo sent you"
+            case "elsewhere": "this account is already online on another device. Leave online play there first"
+            case "disabled": "this account is disabled"
+            case "unknown": "it doesn't recognise this account. Sign out and sign in again under Multiplayer"
+            default: "it gave the reason \"\(reason.isEmpty ? "none" : reason)\""
+            }
+            return "Nextendo refuses online play: \(why)."
+        }
+    }
+
+    /// Asks Nextendo whether this account may play online right now, and why not.
+    /// The game's NEX login applies the same gates, but its only answer is error
+    /// 2306-0807 (validation failed). Read-only on the server: it opens no play session.
+    static func onlineGate(_ token: String) async -> Gate {
+        var request = URLRequest(url: onlineStatusURL, timeoutInterval: 8)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            return Gate(status: (response as? HTTPURLResponse)?.statusCode ?? 0, json: json)
+        } catch {
+            return .unknown(error.localizedDescription)
+        }
     }
 
     static func signOut() {

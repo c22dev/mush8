@@ -17,6 +17,7 @@ pub mod mii;
 mod nfp;
 pub mod nifm;
 pub mod nextendo;
+mod nextrace;
 mod nsd;
 mod pl;
 mod sfdnsres;

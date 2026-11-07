@@ -253,6 +253,7 @@ struct LauncherView: View {
     @StateObject private var network = LocalNetwork()
     @State private var error: String?
     @State private var launching = false
+    @State private var shownRefusal: String?
     @State private var picking = false
     @State private var browsingMods = false
     @State private var inspectedMod: Mod?
@@ -553,6 +554,13 @@ struct LauncherView: View {
                 s.nextendoName = login.name
                 try? s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
+                let gate = await Nextendo.onlineGate(login.token)
+                setenv("NX_NEXTENDO_GATE", gate.log, 1)
+                if let problem = gate.problem, shownRefusal != problem {
+                    shownRefusal = problem
+                    self.error = problem + " Tap Play again to start anyway: online play won't work until then."
+                    return
+                }
                 network.stop()
                 play()
             } catch {

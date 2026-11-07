@@ -102,6 +102,8 @@ fn async_done() -> Arc<dyn Service> {
 }
 
 fn linked(req: &Request, rsp: &mut Response) -> u32 {
+    let sizes = |bufs: &[crate::ipc::Buffer]| bufs.iter().map(|b| format!("{:#x}", b.size)).collect::<Vec<_>>().join(",");
+    nextendo::diag_once(&format!("acc{}", req.cmd), || format!("[acc] nextendo IManagerForApplication cmd {} (b [{}], c [{}])", req.cmd, sizes(&req.b), sizes(&req.c)));
     match req.cmd {
         0 | 160 => {}
         1 => rsp.push_u64(nextendo::pid()),
@@ -109,6 +111,11 @@ fn linked(req: &Request, rsp: &mut Response) -> u32 {
         3 | 4 => {
             let token = nextendo::id_token();
             let token = token.as_bytes();
+            let room = req.out_buffer().map_or(0, |b| b.size as usize);
+            nextendo::diag_once(&format!("token{}", req.cmd), || {
+                let fit = if room > token.len() { "fits with a NUL" } else if room == token.len() { "fits WITHOUT a NUL" } else { "TRUNCATED" };
+                format!("[acc] nextendo id token for cmd {}: {} bytes into a {room:#x}-byte buffer, {fit}", req.cmd, token.len())
+            });
             if let Some(b) = req.out_buffer() {
                 let mut out = vec![0u8; b.size as usize];
                 let n = token.len().min(out.len());
