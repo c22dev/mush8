@@ -120,6 +120,7 @@ Thanks to everyone who contributed :
 - [FritteHD](https://github.com/FritteHD) : browser phone pad
 - [justr4mzi](https://github.com/justr4mzi) : kernel signal, Mii and video decoder fixes
 - [184904](https://github.com/184904) : null index buffer fix
+- [iCosiSenpai](https://github.com/iCosiSenpai) : Nextendo online refusal reasons and NEX login trace
 
 Contributions are welcome !
 
