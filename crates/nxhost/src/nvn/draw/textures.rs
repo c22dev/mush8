@@ -59,7 +59,7 @@ pub fn is_compressed(nvn: u32) -> bool {
 pub struct Textures {
     map: FastMap<TexKey, Shared<Texture>>,
     block_views: Vec<(TexKey, Shared<Texture>)>,
-    aliases: FastMap<TexKey, Vec<Shared<Texture>>>,
+    aliases: FastMap<TexKey, Vec<(Shared<Texture>, Option<gfx::bc::Kind>)>>,
     storage: FastMap<TexKey, (u32, Shared<Texture>)>,
     views: FastMap<(TexKey, TexKind, [u32; 4]), Shared<Texture>>,
     dummies: FastMap<(TexKind, u8), Shared<Texture>>,
@@ -85,7 +85,7 @@ impl Textures {
         self.map.get(key).map(|t| (*key, t.clone()))
     }
 
-    pub fn aliases_of(&self, key: &TexKey) -> &[Shared<Texture>] {
+    pub fn aliases_of(&self, key: &TexKey) -> &[(Shared<Texture>, Option<gfx::bc::Kind>)] {
         self.aliases.get(key).map(Vec::as_slice).unwrap_or(&[])
     }
 
@@ -122,16 +122,17 @@ impl Textures {
             return None;
         };
         let base_key = TexKey { format: 0, ..key };
-        if is_compressed(key.format) && gfx::bc::soft(key.format).is_none() {
+        let soft = gfx::bc::soft(key.format).filter(|k| gpu_decodable(*k));
+        if is_compressed(key.format) && (gfx::bc::soft(key.format).is_none() || soft.is_some()) {
             if let Some((bk, base)) = self.block_views.iter().find(|(bk, _)| bk.addr == key.addr).map(|(k, t)| (*k, t.clone())) {
                 let (bw, bh, bpb) = super::super::format_info(key.format);
                 let (_, _, base_bpb) = super::super::format_info(bk.format);
                 if bpb == base_bpb && bk.width == key.width.div_ceil(bw) && bk.height == key.height.div_ceil(bh) {
                     let alias = self.create(b, key, format, true)?;
                     let cb = gfx::gpu().queue.0.commandBuffer()?;
-                    copy_blocks(&cb, &base.0, &alias.0, None);
+                    refresh_alias(&cb, &base.0, &alias.0, soft, None);
                     cb.commit();
-                    self.aliases.entry(bk).or_default().push(alias.clone());
+                    self.aliases.entry(bk).or_default().push((alias.clone(), soft));
                     self.map.insert(key, alias.clone());
                     return Some((key, alias));
                 }
@@ -210,6 +211,8 @@ impl Textures {
         let mut usage = MTLTextureUsage::ShaderRead;
         if !is_compressed(key.format) {
             usage |= MTLTextureUsage::RenderTarget | MTLTextureUsage::PixelFormatView;
+        } else if gfx::bc::soft(key.format).is_some_and(gpu_decodable) {
+            usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::PixelFormatView;
         }
         d.setUsage(usage);
         d.setStorageMode(MTLStorageMode::Private);
@@ -663,6 +666,125 @@ fn memory_hashes(addr: u64, len: u64) -> [u64; WINDOWS] {
         *h = memory_hash(addr, len, w);
     }
     hashes
+}
+
+pub fn gpu_decodable(k: gfx::bc::Kind) -> bool {
+    matches!(k, gfx::bc::Kind::Bc1 | gfx::bc::Kind::Bc3)
+}
+
+pub fn refresh_alias(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, soft: Option<gfx::bc::Kind>, only: Option<(u32, u32)>) {
+    match soft {
+        Some(k) => decode_blocks(cb, src, dst, k, only),
+        None => copy_blocks(cb, src, dst, only),
+    }
+}
+
+const BC_DECODE_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+static float3 rgb565(uint c) {
+    uint r = (c >> 11) & 31u, g = (c >> 5) & 63u, b = c & 31u;
+    return float3((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2));
+}
+
+kernel void bc_decode(texture2d_array<uint, access::read> src [[texture(0)]],
+                      texture2d_array<float, access::write> dst [[texture(1)]],
+                      constant uint& bc3 [[buffer(0)]],
+                      uint3 gid [[thread_position_in_grid]]) {
+    if (gid.x >= src.get_width() || gid.y >= src.get_height()) return;
+    uint4 blk = src.read(gid.xy, gid.z);
+    uint2 color = bc3 != 0u ? blk.zw : blk.xy;
+    uint c0 = color.x & 0xFFFFu, c1 = color.x >> 16;
+    float3 p[4];
+    p[0] = rgb565(c0);
+    p[1] = rgb565(c1);
+    float pa[4] = {255.0, 255.0, 255.0, 255.0};
+    if (bc3 != 0u || c0 > c1) {
+        p[2] = round((2.0 * p[0] + p[1]) / 3.0);
+        p[3] = round((p[0] + 2.0 * p[1]) / 3.0);
+    } else {
+        p[2] = round((p[0] + p[1]) / 2.0);
+        p[3] = float3(0.0);
+        pa[3] = 0.0;
+    }
+    float a[8];
+    ulong abits = 0;
+    if (bc3 != 0u) {
+        a[0] = float(blk.x & 0xFFu);
+        a[1] = float((blk.x >> 8) & 0xFFu);
+        if (a[0] > a[1]) {
+            for (uint i = 1; i < 7; i++) a[i + 1] = round(((7.0 - i) * a[0] + i * a[1]) / 7.0);
+        } else {
+            for (uint i = 1; i < 5; i++) a[i + 1] = round(((5.0 - i) * a[0] + i * a[1]) / 5.0);
+            a[6] = 0.0;
+            a[7] = 255.0;
+        }
+        abits = ulong(blk.x >> 16) | (ulong(blk.y) << 16);
+    }
+    uint w = dst.get_width(), h = dst.get_height();
+    for (uint i = 0; i < 16; i++) {
+        uint2 px = gid.xy * 4u + uint2(i & 3u, i >> 2);
+        if (px.x >= w || px.y >= h) continue;
+        uint ci = (color.y >> (2u * i)) & 3u;
+        float alpha = bc3 != 0u ? a[uint(abits >> (3u * i)) & 7u] : pa[ci];
+        dst.write(float4(p[ci], alpha) / 255.0, px, gid.z);
+    }
+}
+"#;
+
+fn decode_pipeline() -> Option<Shared<ComputePipeline>> {
+    static P: std::sync::OnceLock<Option<Shared<ComputePipeline>>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let dev = &gfx::gpu().device.0;
+        let lib = dev.newLibraryWithSource_options_error(&objc2_foundation::NSString::from_str(BC_DECODE_MSL), None).inspect_err(|e| eprintln!("[gfx] bc decode kernel: {e:?}")).ok()?;
+        let f = lib.newFunctionWithName(&objc2_foundation::NSString::from_str("bc_decode"))?;
+        dev.newComputePipelineStateWithFunction_error(&f).ok().map(Shared)
+    })
+    .clone()
+}
+
+type ComputePipeline = objc2::runtime::ProtocolObject<dyn MTLComputePipelineState>;
+
+fn decode_blocks(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, k: gfx::bc::Kind, only: Option<(u32, u32)>) {
+    let Some(pipe) = decode_pipeline() else { return };
+    let cube = |t: &Texture| if matches!(t.textureType(), MTLTextureType::TypeCube | MTLTextureType::TypeCubeArray) { 6 } else { 1 };
+    let slices = (src.arrayLength() * cube(src)).min(dst.arrayLength() * cube(dst));
+    let levels = src.mipmapLevelCount().min(dst.mipmapLevelCount());
+    let raw = match dst.pixelFormat() {
+        MTLPixelFormat::RGBA8Unorm_sRGB => MTLPixelFormat::RGBA8Unorm,
+        f => f,
+    };
+    let Some(enc) = cb.computeCommandEncoder() else { return };
+    enc.setComputePipelineState(&pipe.0);
+    let bc3: u32 = (k == gfx::bc::Kind::Bc3) as u32;
+    for level in 0..levels {
+        if only.is_some_and(|(_, l)| l as usize != level) {
+            continue;
+        }
+        let (first, count) = match only {
+            Some((s, _)) if (s as usize) < slices => (s as usize, 1),
+            Some(_) => continue,
+            None => (0, slices),
+        };
+        let range = (NSRange { location: level, length: 1 }, NSRange { location: first, length: count });
+        let (Some(sv), Some(dv)) = (unsafe {
+            (
+                src.newTextureViewWithPixelFormat_textureType_levels_slices(src.pixelFormat(), MTLTextureType::Type2DArray, range.0, range.1),
+                dst.newTextureViewWithPixelFormat_textureType_levels_slices(raw, MTLTextureType::Type2DArray, range.0, range.1),
+            )
+        }) else {
+            continue;
+        };
+        unsafe {
+            enc.setTexture_atIndex(Some(&sv), 0);
+            enc.setTexture_atIndex(Some(&dv), 1);
+            enc.setBytes_length_atIndex(std::ptr::NonNull::from(&bc3).cast(), 4, 0);
+        }
+        let (bw, bh) = ((src.width() >> level).max(1), (src.height() >> level).max(1));
+        enc.dispatchThreads_threadsPerThreadgroup(MTLSize { width: bw, height: bh, depth: count }, MTLSize { width: 8, height: 8, depth: 1 });
+    }
+    enc.endEncoding();
 }
 
 pub fn copy_blocks(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, only: Option<(u32, u32)>) {

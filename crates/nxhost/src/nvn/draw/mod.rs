@@ -341,8 +341,8 @@ impl Replay<'_> {
             p.enc.endEncoding();
             for (k, sub) in &p.keys {
                 if let Some((_, src)) = self.e.textures.cached(k) {
-                    for dst in self.e.textures.aliases_of(k) {
-                        textures::copy_blocks(&self.cb, &src.0, &dst.0, Some(*sub));
+                    for (dst, soft) in self.e.textures.aliases_of(k) {
+                        textures::refresh_alias(&self.cb, &src.0, &dst.0, *soft, Some(*sub));
                     }
                 }
             }
