@@ -7,6 +7,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const BASE: &str = "https://nextendo.network";
+const CLIENT_ID: &str = "nxc_PZv-XFn79sLo";
 pub const MK8: u64 = crate::svc::PROGRAM_ID;
 const FRIENDS_TTL: Duration = Duration::from_secs(10);
 const PRESENCE_EVERY: Duration = Duration::from_secs(45);
@@ -98,6 +99,7 @@ fn send(token: &str, method: &str, path: &str, body: Option<&str>) -> Result<(is
         let header = |k: &str, v: &str| req.setValue_forHTTPHeaderField(Some(&NSString::from_str(v)), &NSString::from_str(k));
         header("Authorization", &format!("Bearer {token}"));
         header("User-Agent", "Mush8");
+        header("X-Nextendo-Client-Id", CLIENT_ID);
         if let Some(b) = body {
             header("Content-Type", "application/json");
             req.setHTTPBody(Some(&NSData::with_bytes(b.as_bytes())));
