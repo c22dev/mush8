@@ -30,7 +30,22 @@ if [ -z "$DEVICE" ]; then
   fi
   DEVICE="$(devices)"
 fi
-echo "device $DEVICE"
+MODEL="$(xcrun devicectl device info details --device "$DEVICE" --json-output - 2>/dev/null | /usr/bin/python3 -I -c '
+import json, sys
+try: print(json.load(sys.stdin)["result"]["hardwareProperties"]["productType"])
+except Exception: pass
+')"
+echo "device $DEVICE ${MODEL:-unknown model}"
+MAJOR="${MODEL#iPhone}"
+case "$MODEL" in
+  iPad*) NATIVE_BC=1 ;;
+  iPhone*,*) [ "${MAJOR%%,*}" -ge 16 ] && NATIVE_BC=1 || NATIVE_BC=0 ;;
+  *) NATIVE_BC=0 ;;
+esac
+if [ "$NATIVE_BC" = 1 ] && [ "$NSP" = 0 ]; then
+  echo "iPad or iPhone 15 Pro and newer: using the .nsp files, not the prepared game data"
+  NSP=1
+fi
 
 TEAM="${TEAM:-$(defaults export com.apple.dt.Xcode - 2>/dev/null | /usr/bin/python3 -I -c '
 import plistlib, sys
