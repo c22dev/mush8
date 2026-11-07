@@ -2,8 +2,10 @@
 // Constantin Clerc (c22dev) - 0.1
 import SwiftUI
 
+private let notCountries: Set<String> = ["AC", "CP", "DG", "EA", "EU", "EZ", "IC", "QO", "TA", "UN", "XK"]
+
 let countryCodes: [String] = Locale.Region.isoRegions.map(\.identifier)
-    .filter { $0.count == 2 && $0.allSatisfy(\.isLetter) }
+    .filter { $0.count == 2 && $0.allSatisfy(\.isLetter) && !notCountries.contains($0) }
     .sorted { countryName($0).localizedCompare(countryName($1)) == .orderedAscending }
 
 func countryName(_ code: String) -> String { Locale.current.localizedString(forRegionCode: code) ?? code }
