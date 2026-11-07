@@ -1,8 +1,5 @@
 // Mush8 - nextrace.rs
-// Nextendo diagnostics, on with NX_NEXTENDO_TRACE=1. Summarises the NEX traffic
-// the game sends over TLS so a rejected login can be explained. It never logs the
-// id token, the nx2 token's signature, tickets or session keys: only their shape,
-// and the fields that tell which server check fails.
+// Constantin Clerc (c22dev) - 0.1
 use crate::services::nextendo;
 use std::collections::VecDeque;
 
@@ -361,7 +358,6 @@ fn auth_request(method: u32, body: &[u8]) {
         }
     }
     if method == 6 {
-        // ValidateAndRequestTicketParam ends with skip_version_check, nex and client versions.
         if let Some(tail) = rest.len().checked_sub(9).and_then(|n| rest.get(n..)) {
             let mut t = Reader::new(tail);
             if let (Some(skip), Some(nex), Some(client)) = (t.u8(), t.u32(), t.u32()) {
@@ -392,8 +388,6 @@ fn auth_response(method: u32, body: &[u8]) {
     }
 }
 
-/// NEX strings (u16 length, text, NUL) found in a response body. Strings that
-/// look like keys (long hex) are left out.
 fn nex_strings(body: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -444,7 +438,6 @@ pub fn base64url_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Keys and scalar values of a flat JSON object, in order. Enough for JWT claims.
 pub fn flat_json(s: &str) -> Option<Vec<(String, String)>> {
     let b = s.trim().as_bytes();
     if b.first() != Some(&b'{') || b.last() != Some(&b'}') {
@@ -504,8 +497,6 @@ pub fn flat_json(s: &str) -> Option<Vec<(String, String)>> {
     }
 }
 
-/// One-line, redacted description of an nx2 token: structure, PID match and
-/// expiry. The username and the signature are never included.
 pub fn describe_nnex(token: &str, now: u64, pid: u64) -> String {
     let Some(rest) = token.strip_prefix("nx2.") else { return format!("not an nx2 token ({} chars)", token.len()) };
     let Some((payload, mac)) = rest.split_once('.') else { return "nx2 token without a signature".into() };
@@ -522,7 +513,6 @@ pub fn describe_nnex(token: &str, now: u64, pid: u64) -> String {
     format!("nx2 PID matches the launcher PID {pid_ok}, username {} chars, expires in {expiry}, HMAC-SHA256 shape {mac_ok}", user.len())
 }
 
-/// One-line, redacted description of an id token as transmitted.
 pub fn describe_jwt(jwt: &str, now: u64, pid: u64) -> String {
     let parts: Vec<&str> = jwt.split('.').collect();
     if parts.len() != 3 {
@@ -601,7 +591,6 @@ mod tests {
 
     #[test]
     fn traces_a_websocket_login_and_rejection() {
-        // A LoginEx over WebSocket must be decoded and its rejection named.
         let mut body = Vec::new();
         let user = b"1800000042\0";
         body.extend_from_slice(&(user.len() as u16).to_le_bytes());

@@ -110,7 +110,6 @@ enum Nextendo {
             }
         }
 
-        /// What to tell the player when Nextendo refuses online play.
         var problem: String? {
             guard case .refused(let reason) = self else { return nil }
             let why = switch reason {
@@ -125,9 +124,6 @@ enum Nextendo {
         }
     }
 
-    /// Asks Nextendo whether this account may play online right now, and why not.
-    /// The game's NEX login applies the same gates, but its only answer is error
-    /// 2306-0807 (validation failed). Read-only on the server: it opens no play session.
     static func onlineGate(_ token: String) async -> Gate {
         var request = URLRequest(url: onlineStatusURL, timeoutInterval: 8)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
