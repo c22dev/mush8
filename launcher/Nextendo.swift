@@ -11,6 +11,7 @@ struct NextendoLogin {
     let pid: UInt64
     let name: String
     let token: String
+    let access: String
 }
 
 enum Nextendo {
@@ -82,7 +83,13 @@ enum Nextendo {
         guard let nex = json["nex_token"] as? String, !nex.isEmpty, let pid = (json["pid"] as? NSNumber)?.uint64Value, pid != 0 else {
             throw Failure("Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account")
         }
-        return NextendoLogin(pid: pid, name: json["username"] as? String ?? "", token: nex)
+        return NextendoLogin(pid: pid, name: json["username"] as? String ?? "", token: nex, access: access)
+    }
+
+    static func freshAccess() async throws -> String {
+        let refresh = NextendoKeychain.read("refresh_token")
+        guard !refresh.isEmpty else { throw Failure("Sign in to Nextendo under Multiplayer first") }
+        return try await token(["grant_type": "refresh_token", "client_id": clientID, "refresh_token": refresh])
     }
 
     enum Gate: Equatable {

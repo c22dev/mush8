@@ -749,6 +749,7 @@ struct LauncherView: View {
                 s.nextendoName = login.name
                 s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
+                setenv("NX_NEXTENDO_ACCESS", login.access, 1)
                 let gate = await Nextendo.onlineGate(login.token)
                 setenv("NX_NEXTENDO_GATE", gate.log, 1)
                 let refusal = gate.problem.map { "\(login.pid) \($0)" }

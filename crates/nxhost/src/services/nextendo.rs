@@ -17,7 +17,7 @@ pub fn pid() -> u64 {
     std::env::var("NX_NEXTENDO_PID").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
 }
 
-pub fn token() -> String {
+fn token() -> String {
     std::env::var("NX_NEXTENDO_TOKEN").unwrap_or_default().trim().to_string()
 }
 

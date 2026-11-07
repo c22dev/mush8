@@ -614,6 +614,7 @@ struct LauncherView: View {
                 s.nextendoName = login.name
                 try? s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
+                setenv("NX_NEXTENDO_ACCESS", login.access, 1)
                 let gate = await Nextendo.onlineGate(login.token)
                 setenv("NX_NEXTENDO_GATE", gate.log, 1)
                 let refusal = gate.problem.map { "\(login.pid) \($0)" }
@@ -653,6 +654,22 @@ public func mush8ShowLauncher(_ viewController: UnsafeMutableRawPointer, _ play:
     door.host = host
     host.modalPresentationStyle = .fullScreen
     parent.present(host, animated: false)
+}
+
+private final class AccessBox: @unchecked Sendable {
+    var value: String?
+}
+
+@_cdecl("mush8_nextendo_access")
+public func mush8NextendoAccess() -> UnsafeMutablePointer<CChar>? {
+    let done = DispatchSemaphore(value: 0)
+    let box = AccessBox()
+    Task.detached {
+        box.value = try? await Nextendo.freshAccess()
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + 30) == .success, let access = box.value, !access.isEmpty else { return nil }
+    return strdup(access)
 }
 
 @_cdecl("mush8_each_mod")

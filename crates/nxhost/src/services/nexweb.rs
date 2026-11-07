@@ -12,35 +12,122 @@ const FRIENDS_TTL: Duration = Duration::from_secs(10);
 const PRESENCE_EVERY: Duration = Duration::from_secs(45);
 const PRESENCE_MIN_GAP: Duration = Duration::from_secs(3);
 const MAX_DEPTH: usize = 64;
+const ACCESS_LIFE: Duration = Duration::from_secs(50 * 60);
+const RENEW_RETRY: Duration = Duration::from_secs(5 * 60);
 
-fn active() -> bool {
-    nextendo::enabled() && !nextendo::token().is_empty()
+fn signed_in_access() -> String {
+    std::env::var("NX_NEXTENDO_ACCESS").unwrap_or_default().trim().to_string()
 }
 
-fn http(method: &str, path: &str, body: Option<&str>) -> Option<(isize, Vec<u8>)> {
+fn active() -> bool {
+    nextendo::enabled() && !signed_in_access().is_empty()
+}
+
+struct Access {
+    token: String,
+    since: Option<Instant>,
+    failed: Option<Instant>,
+}
+
+static ACCESS: Mutex<Access> = Mutex::new(Access { token: String::new(), since: None, failed: None });
+
+#[cfg(target_os = "ios")]
+fn renewed_access() -> Option<String> {
+    unsafe extern "C" {
+        fn mush8_nextendo_access() -> *mut std::ffi::c_char;
+    }
+    let raw = unsafe { mush8_nextendo_access() };
+    if raw.is_null() {
+        return None;
+    }
+    let token = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
+    unsafe { libc::free(raw.cast()) };
+    Some(token)
+}
+
+#[cfg(not(target_os = "ios"))]
+fn renewed_access() -> Option<String> {
+    None
+}
+
+fn access(renew: bool) -> String {
+    let mut a = ACCESS.lock().unwrap();
+    if a.since.is_none() {
+        a.token = signed_in_access();
+        a.since = Some(Instant::now());
+    }
+    let due = renew || a.since.is_some_and(|s| s.elapsed() >= ACCESS_LIFE);
+    let waiting = a.failed.is_some_and(|f| f.elapsed() < RENEW_RETRY);
+    if due && !waiting {
+        match renewed_access() {
+            Some(token) => {
+                a.token = token;
+                a.since = Some(Instant::now());
+                a.failed = None;
+            }
+            None => {
+                if a.failed.is_none() {
+                    eprintln!("[nextendo] could not renew the sign-in for friends and presence");
+                }
+                a.failed = Some(Instant::now());
+            }
+        }
+    }
+    a.token.clone()
+}
+
+fn http(method: &str, path: &str, body: Option<&str>) -> Result<(isize, Vec<u8>), String> {
+    let sent = access(false);
+    let reply = send(&sent, method, path, body);
+    if !matches!(reply, Ok((401, _))) {
+        return reply;
+    }
+    let fresh = match access(false) {
+        same if same == sent => access(true),
+        newer => newer,
+    };
+    if fresh == sent { reply } else { send(&fresh, method, path, body) }
+}
+
+fn send(token: &str, method: &str, path: &str, body: Option<&str>) -> Result<(isize, Vec<u8>), String> {
     let rx = objc2::rc::autoreleasepool(|_| {
-        let url = NSURL::URLWithString(&NSString::from_str(&format!("{BASE}{path}")))?;
+        let url = NSURL::URLWithString(&NSString::from_str(&format!("{BASE}{path}"))).ok_or("bad url")?;
         let req = NSMutableURLRequest::requestWithURL(&url);
         req.setHTTPMethod(&NSString::from_str(method));
         req.setTimeoutInterval(10.0);
         let header = |k: &str, v: &str| req.setValue_forHTTPHeaderField(Some(&NSString::from_str(v)), &NSString::from_str(k));
-        header("Authorization", &format!("Bearer {}", nextendo::token()));
+        header("Authorization", &format!("Bearer {token}"));
         header("User-Agent", "Mush8");
         if let Some(b) = body {
             header("Content-Type", "application/json");
             req.setHTTPBody(Some(&NSData::with_bytes(b.as_bytes())));
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let done = RcBlock::new(move |data: *mut NSData, resp: *mut NSURLResponse, _: *mut NSError| {
-            let status = unsafe { resp.as_ref() }.and_then(|r| r.downcast_ref::<NSHTTPURLResponse>()).map_or(0, |r| r.statusCode());
-            let bytes = unsafe { data.as_ref() }.map(|d| d.to_vec()).unwrap_or_default();
-            let _ = tx.try_send((status, bytes));
+        let done = RcBlock::new(move |data: *mut NSData, resp: *mut NSURLResponse, err: *mut NSError| {
+            let reply = match unsafe { err.as_ref() } {
+                Some(e) => Err(format!("{} ({})", e.localizedDescription(), e.code())),
+                None => {
+                    let status = unsafe { resp.as_ref() }.and_then(|r| r.downcast_ref::<NSHTTPURLResponse>()).map_or(0, |r| r.statusCode());
+                    Ok((status, unsafe { data.as_ref() }.map(|d| d.to_vec()).unwrap_or_default()))
+                }
+            };
+            let _ = tx.try_send(reply);
         });
         let task = unsafe { NSURLSession::sharedSession().dataTaskWithRequest_completionHandler(&req, &done) };
         task.resume();
-        Some(rx)
+        Ok::<_, String>(rx)
     })?;
-    rx.recv_timeout(Duration::from_secs(15)).ok()
+    rx.recv_timeout(Duration::from_secs(15)).map_err(|_| "no answer in 15s".to_string())?
+}
+
+fn why(r: &Result<(isize, Vec<u8>), String>) -> String {
+    match r {
+        Ok((status, body)) => {
+            let text = String::from_utf8_lossy(&body[..body.len().min(160)]).replace('\n', " ");
+            format!("HTTP {status} {}", text.trim())
+        }
+        Err(e) => e.clone(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,9 +395,11 @@ static FRIENDS: Mutex<Cache> = Mutex::new(Cache { list: Vec::new(), loaded: fals
 static FRIENDS_READY: Condvar = Condvar::new();
 
 fn refresh_friends() {
-    let fetched = http("GET", "/api/friends", None)
-        .filter(|(status, _)| *status == 200)
-        .and_then(|(_, body)| parse_friends(&String::from_utf8_lossy(&body)));
+    let reply = http("GET", "/api/friends", None);
+    let fetched = match &reply {
+        Ok((200, body)) => parse_friends(&String::from_utf8_lossy(body)),
+        _ => None,
+    };
     let mut c = FRIENDS.lock().unwrap();
     match fetched {
         Some(list) => {
@@ -320,7 +409,7 @@ fn refresh_friends() {
             c.list = list;
             c.loaded = true;
         }
-        None if !c.loaded => eprintln!("[nextendo] could not read the friend list"),
+        None if !c.loaded => eprintln!("[nextendo] could not read the friend list: {}", why(&reply)),
         None => {}
     }
     c.tried = Some(Instant::now());
@@ -364,7 +453,7 @@ pub fn presence_body(status: u32, app_field: &[u8]) -> String {
 
 fn publish_loop() {
     let mut last: Option<Instant> = None;
-    let mut published = false;
+    let mut logged: Option<bool> = None;
     loop {
         {
             let p = PRESENCE.lock().unwrap();
@@ -378,10 +467,14 @@ fn publish_loop() {
             p.dirty = false;
             presence_body(p.status, &p.app_field)
         };
-        let ok = matches!(http("POST", "/api/presence", Some(&body)), Some((200..=299, _)));
-        if ok != published {
-            eprintln!("[nextendo] {}", if ok { "presence published" } else { "could not publish presence" });
-            published = ok;
+        let reply = http("POST", "/api/presence", Some(&body));
+        let ok = matches!(reply, Ok((200..=299, _)));
+        if logged != Some(ok) {
+            match ok {
+                true => eprintln!("[nextendo] presence published"),
+                false => eprintln!("[nextendo] could not publish presence: {}", why(&reply)),
+            }
+            logged = Some(ok);
         }
         last = Some(Instant::now());
     }
