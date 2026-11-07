@@ -192,7 +192,8 @@ final class Files: ObservableObject {
     @Published var copying: String?
     @Published var error: String?
 
-    var ready: Bool { gameFiles.allSatisfy { $0.optional || present[$0.name] == true } }
+    var ready: Bool { prepared || gameFiles.allSatisfy { $0.optional || present[$0.name] == true } }
+    var prepared: Bool { FileManager.default.fileExists(atPath: docsURL.appendingPathComponent("prepared/romfs.bin").path) }
 
     func scan() {
         let fm = FileManager.default
@@ -381,8 +382,8 @@ struct LauncherView: View {
                         VStack(alignment: .trailing) {
                             Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory))
                                 .foregroundStyle(.secondary).monospacedDigit()
-                            if memory < 4 << 30 {
-                                Text("4 GB is recommended: close other apps").font(.caption).foregroundStyle(.orange)
+                            if memory < 7 << 29 {
+                                Text("3.5 GB is recommended: close other apps").font(.caption).foregroundStyle(.orange)
                             }
                         }
                     }
@@ -462,7 +463,13 @@ struct LauncherView: View {
 
     var gameFilesSection: some View {
         Section("Game files") {
-            ForEach(gameFiles) { f in
+            if files.prepared {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text("Prepared game data")
+                }
+            }
+            ForEach(gameFiles.filter { !files.prepared || !$0.name.hasSuffix(".nsp") || files.present[$0.name] == true }) { f in
                 HStack {
                     Image(systemName: files.present[f.name] == true ? "checkmark.circle.fill" : (f.optional ? "minus.circle" : "xmark.circle.fill"))
                         .foregroundStyle(files.present[f.name] == true ? .green : (f.optional ? .secondary : .red))
