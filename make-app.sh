@@ -12,7 +12,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp target/release/nxhost target/release/nxfs target/release/nxpatch "$APP/Contents/MacOS/"
 swiftc -O -parse-as-library -target arm64-apple-macos14 launcher/Launcher.swift launcher/ModDiscovery.swift launcher/ModContents.swift launcher/GameBanana.swift launcher/ModInstaller.swift launcher/ModBrowser.swift launcher/ModList.swift launcher/Nextendo.swift launcher/Miis.swift launcher/Player.swift \
   -import-objc-header launcher/Archive.h -larchive -o "$APP/Contents/MacOS/Launcher"
-xcrun actool AppIcon.icon --compile "$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
+xcrun actool "$PWD/AppIcon.icon" --compile "$APP/Contents/Resources" --app-icon AppIcon --platform macosx \
   --minimum-deployment-target 14.0 --output-partial-info-plist "$(mktemp -d)/icon.plist" >/dev/null
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
