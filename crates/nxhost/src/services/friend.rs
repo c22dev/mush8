@@ -176,8 +176,7 @@ impl Service for FriendService {
             10610 => {
                 let p = bytes(in_buf(req, 0));
                 if p.len() >= 0x20 {
-                    let status = u32::from_le_bytes(p[0x18..0x1C].try_into().unwrap());
-                    nexweb::set_presence(status, &p[0x20..p.len().min(0x20 + APP_FIELD)]);
+                    nexweb::set_presence(&p[0x20..p.len().min(0x20 + APP_FIELD)]);
                 }
             }
             _ => return Stub(self.name()).call(req, rsp),

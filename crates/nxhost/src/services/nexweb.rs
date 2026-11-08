@@ -436,20 +436,21 @@ pub fn friends(wait: Duration) -> Vec<Friend> {
 }
 
 struct Presence {
-    status: u32,
     app_field: Vec<u8>,
+    detail: String,
     dirty: bool,
 }
 
-static PRESENCE: Mutex<Presence> = Mutex::new(Presence { status: 2, app_field: Vec::new(), dirty: true });
+static PRESENCE: Mutex<Presence> = Mutex::new(Presence { app_field: Vec::new(), detail: String::new(), dirty: true });
 static PRESENCE_CHANGED: Condvar = Condvar::new();
 
-pub fn presence_body(status: u32, app_field: &[u8]) -> String {
+pub fn presence_body(app_field: &[u8], detail: &str) -> String {
     let end = app_field.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
     format!(
-        "{{\"status\":{status},\"app_field\":{},\"app_id\":{},\"app_detail\":\"\"}}",
+        "{{\"status\":2,\"app_field\":{},\"app_id\":{},\"app_detail\":{}}}",
         json_str(&base64(&app_field[..end])),
-        json_str(&format!("{MK8:016X}"))
+        json_str(&format!("{MK8:016X}")),
+        json_str(detail)
     )
 }
 
@@ -467,7 +468,7 @@ fn publish_loop() {
         let body = {
             let mut p = PRESENCE.lock().unwrap();
             p.dirty = false;
-            presence_body(p.status, &p.app_field)
+            presence_body(&p.app_field, &p.detail)
         };
         let reply = http("POST", "/api/presence", Some(&body));
         let ok = matches!(reply, Ok((200..=299, _)));
@@ -482,12 +483,25 @@ fn publish_loop() {
     }
 }
 
-pub fn set_presence(status: u32, app_field: &[u8]) {
+pub fn set_detail(detail: &str) {
+    if !active() {
+        return;
+    }
+    let detail: String = detail.trim().chars().take(64).collect();
+    let mut p = PRESENCE.lock().unwrap();
+    if p.detail == detail {
+        return;
+    }
+    p.detail = detail;
+    p.dirty = true;
+    PRESENCE_CHANGED.notify_all();
+}
+
+pub fn set_presence(app_field: &[u8]) {
     if !active() {
         return;
     }
     let mut p = PRESENCE.lock().unwrap();
-    p.status = status.clamp(1, 2);
     p.app_field = app_field.to_vec();
     p.dirty = true;
     PRESENCE_CHANGED.notify_all();
@@ -537,8 +551,8 @@ mod tests {
         let mut field = vec![0u8; 0xC0];
         field[..3].copy_from_slice(b"Hi\0");
         field[3] = 7;
-        assert_eq!(presence_body(2, &field), r#"{"status":2,"app_field":"SGkABw==","app_id":"0100152000022000","app_detail":""}"#);
-        assert_eq!(presence_body(1, &[0; 0xC0]), r#"{"status":1,"app_field":"","app_id":"0100152000022000","app_detail":""}"#);
+        assert_eq!(presence_body(&field, "Worldwide"), r#"{"status":2,"app_field":"SGkABw==","app_id":"0100152000022000","app_detail":"Worldwide"}"#);
+        assert_eq!(presence_body(&[0; 0xC0], ""), r#"{"status":2,"app_field":"","app_id":"0100152000022000","app_detail":""}"#);
     }
 
     #[test]
