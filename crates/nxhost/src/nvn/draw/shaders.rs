@@ -417,16 +417,15 @@ fn guest_compiled(gk: u64, extra: u32, uints: u32, sints: u32) -> Option<Arc<Com
 
 fn aot_function(key: u64, entry: &str) -> Option<Shared<Function>> {
     let file = AOT.index.get(&key)?;
-    let lib = AOT
-        .libs
-        .lock()
-        .unwrap()
-        .entry(file.clone())
-        .or_insert_with(|| {
+    let cached = AOT.libs.lock().unwrap().get(file).cloned();
+    let lib = match cached {
+        Some(l) => l,
+        None => {
             let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&format!("{}/{file}", aot_dir())));
-            gfx::gpu().device.0.newLibraryWithURL_error(&url).ok().map(Shared)
-        })
-        .clone()?;
+            let l = gfx::gpu().device.0.newLibraryWithURL_error(&url).ok().map(Shared);
+            AOT.libs.lock().unwrap().entry(file.clone()).or_insert(l).clone()
+        }
+    }?;
     lib.0.newFunctionWithName(&NSString::from_str(entry)).map(Shared)
 }
 

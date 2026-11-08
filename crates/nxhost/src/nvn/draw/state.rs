@@ -273,7 +273,25 @@ pub struct States {
 }
 
 static DONE: LazyLock<Mutex<Vec<(PipeKey, Option<Shared<Pipeline>>)>>> = LazyLock::new(Default::default);
-static PREWARMED: LazyLock<Mutex<HashMap<Recorded, Shared<Pipeline>>>> = LazyLock::new(Default::default);
+enum Slot {
+    Building,
+    Ready(Shared<Pipeline>),
+    Claimed,
+}
+
+static PREWARMED: LazyLock<Mutex<HashMap<Recorded, Slot>>> = LazyLock::new(Default::default);
+const PREWARM_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct Building<'a>(&'a Recorded);
+
+impl Drop for Building<'_> {
+    fn drop(&mut self) {
+        let mut m = PREWARMED.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(m.get(self.0), Some(Slot::Building)) {
+            m.remove(self.0);
+        }
+    }
+}
 
 impl States {
     pub fn pipeline(&mut self, vs: &Arc<Compiled>, vs_key: (u64, u32), fs: &Arc<Compiled>, fs_key: u64, t: &Targets, st: &GState, wait: bool) -> Result<Shared<Pipeline>, &'static str> {
@@ -309,11 +327,35 @@ impl States {
         }
         let (cs, cm, blend) = (st.color_state, st.channel_mask, st.blend);
         if let Some(r) = Recorded::of(vs, fs, t, cs, cm, &blend) {
-            if let Some(p) = PREWARMED.lock().unwrap().remove(&r) {
-                self.pipelines.insert(key, Some(p.clone()));
-                return Ok(p);
+            let wait = wait || super::shaders::sync_mode();
+            let t0 = std::time::Instant::now();
+            loop {
+                let mut m = PREWARMED.lock().unwrap();
+                match m.get(&r) {
+                    Some(Slot::Ready(_)) => {
+                        let Some(Slot::Ready(p)) = m.insert(r, Slot::Claimed) else { unreachable!() };
+                        drop(m);
+                        self.pipelines.insert(key, Some(p.clone()));
+                        return Ok(p);
+                    }
+                    Some(Slot::Building) if !wait => return Err("pipeline compiling"),
+                    Some(Slot::Building) if t0.elapsed() < PREWARM_WAIT => {
+                        drop(m);
+                        crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+                    }
+                    Some(Slot::Building) => {
+                        m.insert(r, Slot::Claimed);
+                        break;
+                    }
+                    Some(Slot::Claimed) => break,
+                    None => {
+                        m.insert(r.clone(), Slot::Claimed);
+                        drop(m);
+                        record(r);
+                        break;
+                    }
+                }
             }
-            record(r);
         }
         let (jvs, jfs, jt) = (vs.clone(), fs.clone(), t.clone());
         let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
@@ -593,6 +635,14 @@ pub fn prewarm() {
                     s.spawn(|| {
                         unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
                         while let Some(r) = list.get(next.fetch_add(1, Relaxed)) {
+                            {
+                                let mut m = PREWARMED.lock().unwrap();
+                                if m.contains_key(r) {
+                                    continue;
+                                }
+                                m.insert(r.clone(), Slot::Building);
+                            }
+                            let _building = Building(r);
                             objc2::rc::autoreleasepool(|_| {
                                 let (Some(vs), Some(fs)) = (super::shaders::aot_compiled(r.vs), super::shaders::aot_compiled(r.fs)) else { return };
                                 let d = descriptor(&vs.func.0, &fs.func.0, &r.targets(), r.color_state, r.channel_mask, &r.blend);
@@ -600,7 +650,10 @@ pub fn prewarm() {
                                     d.setBinaryArchives(Some(&a.0));
                                 }
                                 if let Ok(p) = gfx::gpu().device.0.newRenderPipelineStateWithDescriptor_error(&d) {
-                                    PREWARMED.lock().unwrap().insert(r.clone(), Shared(p));
+                                    let mut m = PREWARMED.lock().unwrap();
+                                    if matches!(m.get(r), Some(Slot::Building)) {
+                                        m.insert(r.clone(), Slot::Ready(Shared(p)));
+                                    }
                                     built.fetch_add(1, Relaxed);
                                 }
                             });
