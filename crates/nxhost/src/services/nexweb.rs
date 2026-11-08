@@ -51,8 +51,48 @@ fn renewed_access() -> Option<String> {
 }
 
 #[cfg(not(target_os = "ios"))]
+static REFRESH: Mutex<Option<String>> = Mutex::new(None);
+
+#[cfg(not(target_os = "ios"))]
 fn renewed_access() -> Option<String> {
-    None
+    let mut refresh = REFRESH.lock().unwrap();
+    let current = refresh.get_or_insert_with(|| std::env::var("NX_NEXTENDO_REFRESH").unwrap_or_default().trim().to_string()).clone();
+    if current.is_empty() {
+        return None;
+    }
+    let form = format!("grant_type=refresh_token&client_id={}&refresh_token={}", form_value(CLIENT_ID), form_value(&current));
+    let Ok((200, body)) = request("POST", "/api/oauth/token", None, Some(("application/x-www-form-urlencoded", &form))) else { return None };
+    let reply = Json::parse(&String::from_utf8_lossy(&body))?;
+    let next = reply.get("refresh_token").str();
+    if !next.is_empty() {
+        save_refresh(next);
+        *refresh = Some(next.to_string());
+    }
+    Some(reply.get("access_token").str().to_string()).filter(|t| !t.is_empty())
+}
+
+#[cfg(not(target_os = "ios"))]
+fn save_refresh(token: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = std::path::Path::new(&home).join("Library/Application Support/Mush8");
+    let (tmp, file) = (dir.join("nextendo-refresh.tmp"), dir.join("nextendo-refresh"));
+    let saved = std::fs::create_dir_all(&dir).and_then(|_| {
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+        f.write_all(token.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &file)
+    });
+    if let Err(e) = saved {
+        eprintln!("[nextendo] could not keep the renewed sign-in: {e}");
+    }
+}
+
+#[cfg(any(not(target_os = "ios"), test))]
+fn form_value(v: &str) -> String {
+    v.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
 }
 
 fn access(renew: bool) -> String {
@@ -95,17 +135,23 @@ fn http(method: &str, path: &str, body: Option<&str>) -> Result<(isize, Vec<u8>)
 }
 
 fn send(token: &str, method: &str, path: &str, body: Option<&str>) -> Result<(isize, Vec<u8>), String> {
+    request(method, path, Some(token), body.map(|b| ("application/json", b)))
+}
+
+fn request(method: &str, path: &str, token: Option<&str>, body: Option<(&str, &str)>) -> Result<(isize, Vec<u8>), String> {
     let rx = objc2::rc::autoreleasepool(|_| {
         let url = NSURL::URLWithString(&NSString::from_str(&format!("{BASE}{path}"))).ok_or("bad url")?;
         let req = NSMutableURLRequest::requestWithURL(&url);
         req.setHTTPMethod(&NSString::from_str(method));
         req.setTimeoutInterval(10.0);
         let header = |k: &str, v: &str| req.setValue_forHTTPHeaderField(Some(&NSString::from_str(v)), &NSString::from_str(k));
-        header("Authorization", &format!("Bearer {token}"));
+        if let Some(t) = token {
+            header("Authorization", &format!("Bearer {t}"));
+        }
         header("User-Agent", "Mush8");
         header("X-Nextendo-Client-Id", CLIENT_ID);
-        if let Some(b) = body {
-            header("Content-Type", "application/json");
+        if let Some((kind, b)) = body {
+            header("Content-Type", kind);
             req.setHTTPBody(Some(&NSData::with_bytes(b.as_bytes())));
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -646,6 +692,12 @@ mod tests {
         assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
         assert_eq!(iso_utc(951782400), "2000-02-29T00:00:00Z");
         assert_eq!(iso_utc(1794099723), "2026-11-08T01:02:03Z");
+    }
+
+    #[test]
+    fn form_values_are_percent_encoded() {
+        assert_eq!(form_value("nxc_PZv-XFn79sLo"), "nxc_PZv-XFn79sLo");
+        assert_eq!(form_value("a+b/c=d e"), "a%2Bb%2Fc%3Dd%20e");
     }
 
     #[test]

@@ -23,6 +23,7 @@ enum Nextendo {
     static let nexTokenURL = URL(string: "https://nextendo.network/api/nex-token")!
     static let meURL = URL(string: "https://nextendo.network/api/me")!
     static let userInfoURL = URL(string: "https://nextendo.network/api/oauth/userinfo")!
+    static let renewedRefresh = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Mush8/nextendo-refresh")
     static let onlineStatusURL = URL(string: "https://nextendo.network/api/online-status")!
     static let callbackPort: UInt16 = 47823
 
@@ -62,6 +63,7 @@ enum Nextendo {
         if let error = query["error"] { throw Failure("Nextendo refused the sign-in (\(error))") }
         guard let code = query["code"], !code.isEmpty else { throw Failure("Nextendo sent no sign-in code") }
         if let stale = inFlight { _ = try? await stale.value }
+        try? FileManager.default.removeItem(at: renewedRefresh)
         try await token(["grant_type": "authorization_code", "client_id": clientID, "code": code, "code_verifier": verifier, "redirect_uri": redirect])
         return try await freshLogin()
     }
@@ -77,6 +79,10 @@ enum Nextendo {
     }
 
     private static func freshLogin() async throws -> NextendoLogin {
+        if let renewed = try? String(contentsOf: renewedRefresh, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !renewed.isEmpty {
+            try NextendoKeychain.write("refresh_token", renewed)
+        }
+        try? FileManager.default.removeItem(at: renewedRefresh)
         let refresh = NextendoKeychain.read("refresh_token")
         guard !refresh.isEmpty else { throw Failure("Sign in to Nextendo under Multiplayer first") }
         let access = try await token(["grant_type": "refresh_token", "client_id": clientID, "refresh_token": refresh])
@@ -158,6 +164,7 @@ enum Nextendo {
     }
 
     static func signOut() {
+        try? FileManager.default.removeItem(at: renewedRefresh)
         try? NextendoKeychain.write("refresh_token", "")
     }
 
