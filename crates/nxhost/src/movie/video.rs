@@ -51,7 +51,7 @@ impl FrameSource {
                 None => return false,
             }
         }
-        let mut frame = match self.worker.frames.recv_timeout(std::time::Duration::from_millis(250)) {
+        let mut frame = match self.worker.frames.recv_timeout(std::time::Duration::from_millis(8)) {
             Ok(f) => f,
             Err(RecvTimeoutError::Disconnected) => return false,
             Err(RecvTimeoutError::Timeout) => {
