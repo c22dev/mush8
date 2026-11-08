@@ -659,7 +659,75 @@ pub fn set_present_interval(n: u32) {
     PRESENT_INTERVAL.store(n, std::sync::atomic::Ordering::Relaxed);
 }
 
+fn dump_float_raw(tex: &Texture, path: &str) {
+    static ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("NX_DUMP_FLOAT_RAW").is_some());
+    if !*ENABLED || tex.textureType() != MTLTextureType::Type2D || tex.width() > 256 || tex.height() > 256 {
+        return;
+    }
+    let (format, bpp) = match tex.pixelFormat() {
+        MTLPixelFormat::RG11B10Float => ("rg11b10float", 4),
+        MTLPixelFormat::RG16Float => ("rg16float", 4),
+        MTLPixelFormat::RGBA16Float => ("rgba16float", 8),
+        MTLPixelFormat::RGBA32Float => ("rgba32float", 16),
+        _ => return,
+    };
+    let (w, h) = (tex.width(), tex.height());
+    let row = w * bpp;
+    let g = gpu();
+    let Some(buf) = g.device.0.newBufferWithLength_options(row * h, MTLResourceOptions::StorageModeShared) else { return };
+    let Some(cb) = g.queue.0.commandBuffer() else { return };
+    let Some(enc) = cb.blitCommandEncoder() else { return };
+    unsafe {
+        enc.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
+            tex, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 }, &buf, 0, row, row * h,
+        );
+    }
+    enc.endEncoding();
+    cb.commit();
+    cb.waitUntilCompleted();
+    if cb.status() != MTLCommandBufferStatus::Completed {
+        eprintln!("[gfx] float dump failed for {path}: {:?}", cb.error());
+        return;
+    }
+    let data = unsafe { std::slice::from_raw_parts(buf.contents().as_ptr().cast::<u8>(), row * h) };
+    let stem = path.strip_suffix(".png").unwrap_or(path);
+    let raw_path = format!("{stem}_{format}_{w}x{h}.raw");
+    if let Err(e) = std::fs::write(&raw_path, data) {
+        eprintln!("[gfx] cannot write {raw_path}: {e}");
+    }
+}
+
 pub fn dump_png(tex: &Texture, path: &str) {
+    if matches!(tex.textureType(), MTLTextureType::TypeCube | MTLTextureType::TypeCubeArray) {
+        let g = gpu();
+        for slice in 0..tex.arrayLength() * 6 {
+            for level in 0..tex.mipmapLevelCount() {
+                let (w, h) = ((tex.width() >> level).max(1), (tex.height() >> level).max(1));
+                let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(tex.pixelFormat(), w, h, false) };
+                d.setStorageMode(MTLStorageMode::Private);
+                d.setUsage(MTLTextureUsage::ShaderRead);
+                let Some(face) = g.device.0.newTextureWithDescriptor(&d) else {
+                    eprintln!("[gfx] cannot create dump texture for {path}, slice {slice}, mip {level}");
+                    continue;
+                };
+                let Some(cb) = g.queue.0.commandBuffer() else { return };
+                let Some(enc) = cb.blitCommandEncoder() else { return };
+                unsafe {
+                    enc.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                        tex, slice, level, MTLOrigin { x: 0, y: 0, z: 0 }, MTLSize { width: w, height: h, depth: 1 },
+                        &face, 0, 0, MTLOrigin { x: 0, y: 0, z: 0 },
+                    );
+                }
+                enc.endEncoding();
+                cb.commit();
+                cb.waitUntilCompleted();
+                let stem = path.strip_suffix(".png").unwrap_or(path);
+                dump_png(&face, &format!("{stem}_slice{slice}_mip{level}.png"));
+            }
+        }
+        return;
+    }
+    dump_float_raw(tex, path);
     let (w, h) = (tex.width(), tex.height());
     let g = gpu();
     let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::BGRA8Unorm, w, h, false) };
