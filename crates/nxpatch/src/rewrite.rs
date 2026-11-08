@@ -2,6 +2,7 @@
 // Constantin Clerc (c22dev) - 0.1
 use crate::asm::{self, Reg, SP};
 use crate::classify;
+use crate::spin;
 use anyhow::{Context, Result, bail, ensure};
 use capstone::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -339,6 +340,7 @@ pub enum Kind {
     Exclusive,
     JumpTable,
     Online,
+    Spin,
 }
 
 #[derive(Debug, Clone)]
@@ -677,6 +679,20 @@ pub fn rewrite_skipping(nso: &nxfs::nso::Nso, skip: &[u64]) -> Result<Output> {
         }
     }
 
+    let taken: Vec<(u64, u64)> = patches.iter().map(|p| (p.start, p.end)).collect();
+    let loops = spin::find(&words, |i| {
+        let at = i as u64 * 4;
+        !is_header(i) && need[i] == Need::Plain && patched[i] == words[i] && !taken.iter().any(|&(s, e)| (s..e).contains(&at))
+    });
+    for l in loops {
+        let (head, site) = (l.head as u64 * 4, l.back as u64 * 4);
+        let tramp = e.pc();
+        emit_spin(&mut e, keypage, words[l.back], head, site).with_context(|| format!("spin loop at {head:#x}"))?;
+        e.resolve()?;
+        patched[l.back] = asm::b(site, tramp)?;
+        patches.push(Patch { kind: Kind::Spin, start: site, end: site + 4, tramp, tramp_len: e.pc() - tramp });
+    }
+
     let tramp_end = e.pc();
     let mut image = vec![0u8; tramp_end as usize];
     image[..nso.image.len()].copy_from_slice(&nso.image);
@@ -733,6 +749,26 @@ fn emit_online_switch(cx: &Ctx, e: &mut Emitter, keypage: u64, site: u64, prefix
         e.emit(asm::b(pc, target)?);
     }
     e.resolve()
+}
+
+fn emit_spin(e: &mut Emitter, keypage: u64, back: u32, head: u64, site: u64) -> Result<()> {
+    let gate = e.label();
+    if !asm::is_b(back) {
+        e.cond_to(back, gate);
+        let pc = e.pc();
+        e.emit(asm::b(pc, site + 4)?);
+    }
+    e.bind(gate);
+    e.emit(asm::stp_pre(16, 30, SP, -16));
+    e.emit(asm::movz(16, nxabi::SVC_SPIN, 0));
+    let pc = e.pc();
+    e.emit(asm::adrp(30, pc, keypage)?);
+    e.emit(asm::ldr(30, 30, keypage::SVC_GATE));
+    e.emit(asm::blr(30));
+    e.emit(asm::ldp_post(16, 30, SP, 16));
+    let pc = e.pc();
+    e.emit(asm::b(pc, head)?);
+    Ok(())
 }
 
 fn relocate(cx: &Ctx, e: &mut Emitter, block: &[u32], base: u64, internal: bool, exits: &mut BTreeMap<u64, usize>) -> Result<()> {
@@ -981,6 +1017,68 @@ fn emit_jump_table(cx: &Ctx, e: &mut Emitter, sc: &Scratch, jt: &JumpTable, keyp
 mod tests {
     use super::*;
     use unicorn_engine::{Arch, Mode, Prot, RegisterARM64 as R, Unicorn};
+
+    fn run_spin(back: u32, body: &[u32]) -> (u32, u64, u64, u64) {
+        const TEXT: u64 = 0x10000;
+        const KEYPAGE: u64 = 0x20000;
+        const TRAMP: u64 = 0x24000;
+        const GATE: u64 = 0x30000;
+        const FLAG: u64 = 0x40000;
+        const STACK: u64 = 0x50000;
+        let head = TEXT;
+        let site = TEXT + 4 * body.len() as u64;
+        let mut e = Emitter { base: TRAMP, words: Vec::new(), fixups: Vec::new(), labels: Vec::new() };
+        emit_spin(&mut e, KEYPAGE, back, head, site).unwrap();
+        e.resolve().unwrap();
+        let mut text: Vec<u32> = body.to_vec();
+        text.push(asm::b(site, TRAMP).unwrap());
+        text.push(0xD503_201F);
+        let bytes = |w: &[u32]| w.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let mut uc = Unicorn::new(Arch::ARM64, Mode::LITTLE_ENDIAN).unwrap();
+        for (a, s) in [(TEXT, 0x1000), (KEYPAGE, 0x4000), (TRAMP, 0x1000), (GATE, 0x1000), (FLAG, 0x1000), (STACK, 0x10000)] {
+            uc.mem_map(a, s, Prot::ALL).unwrap();
+        }
+        uc.mem_write(TEXT, &bytes(&text)).unwrap();
+        uc.mem_write(TRAMP, &bytes(&e.words)).unwrap();
+        uc.mem_write(GATE, &bytes(&[0xD65F_03C0])).unwrap();
+        uc.mem_write(KEYPAGE + keypage::SVC_GATE as u64, &GATE.to_le_bytes()).unwrap();
+        uc.mem_write(FLAG, &1u32.to_le_bytes()).unwrap();
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let seen = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let (c, sn) = (calls.clone(), seen.clone());
+        uc.add_code_hook(GATE, GATE, move |uc, _, _| {
+            c.set(c.get() + 1);
+            sn.set(uc.reg_read(R::X16).unwrap());
+            if c.get() == 3 {
+                uc.mem_write(FLAG, &0u32.to_le_bytes()).unwrap();
+            }
+        })
+        .unwrap();
+        uc.reg_write(R::X19, FLAG).unwrap();
+        uc.reg_write(R::X16, 0x1616).unwrap();
+        uc.reg_write(R::X30, 0x3030).unwrap();
+        uc.reg_write(R::SP, STACK + 0x8000).unwrap();
+        uc.emu_start(head, site + 4, 0, 10_000).unwrap();
+        let x16 = uc.reg_read(R::X16).unwrap();
+        let x30 = uc.reg_read(R::X30).unwrap();
+        assert_eq!(uc.reg_read(R::SP).unwrap(), STACK + 0x8000);
+        (calls.get(), seen.get(), x16, x30)
+    }
+
+    #[test]
+    fn spin_gate_runs_on_each_conditional_back_edge_and_keeps_registers() {
+        let (calls, n, x16, x30) = run_spin(0x54FF_FFC0, &[0xB940_0268, 0x7100_051F]);
+        assert_eq!(calls, 3);
+        assert_eq!(n, nxabi::SVC_SPIN as u64);
+        assert_eq!((x16, x30), (0x1616, 0x3030));
+    }
+
+    #[test]
+    fn spin_gate_runs_on_an_unconditional_back_edge() {
+        let (calls, _, x16, x30) = run_spin(0x17FF_FFFE, &[0xB940_0268, 0x3400_0048]);
+        assert_eq!(calls, 3);
+        assert_eq!((x16, x30), (0x1616, 0x3030));
+    }
 
     #[test]
     fn every_game_patch_has_a_group() {

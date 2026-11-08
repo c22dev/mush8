@@ -256,6 +256,57 @@ pub fn blocking<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
+fn backoff_cap() -> Duration {
+    static CAP: LazyLock<Duration> = LazyLock::new(|| {
+        let us = std::env::var("NX_YIELD_BACKOFF").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(250);
+        Duration::from_micros(us)
+    });
+    *CAP
+}
+
+const BACKOFF_AFTER: Duration = Duration::from_millis(2);
+const BACKOFF_MIN: Duration = Duration::from_micros(10);
+
+fn backoff(waited: Duration) -> Option<Duration> {
+    let cap = backoff_cap();
+    (waited >= BACKOFF_AFTER && !cap.is_zero()).then(|| (waited / 8).clamp(BACKOFF_MIN, cap.max(BACKOFF_MIN)))
+}
+
+pub fn spin_wait(site: u64) {
+    thread_local! {
+        static SPIN: std::cell::Cell<(u64, Option<(Instant, Instant)>)> = const { std::cell::Cell::new((0, None)) };
+    }
+    let now = Instant::now();
+    let (last_site, run) = SPIN.with(|s| s.get());
+    let first = match run {
+        Some((first, last)) if last_site == site && now - last < Duration::from_micros(100) => first,
+        _ => now,
+    };
+    if let Some(d) = backoff(now - first) {
+        std::thread::sleep(d);
+    }
+    SPIN.with(|s| s.set((site, Some((first, Instant::now())))));
+}
+
+pub fn yield_backoff(regs: Option<[u64; 10]>) {
+    thread_local! {
+        static RUN: std::cell::Cell<Option<(Instant, [u64; 10])>> = const { std::cell::Cell::new(None) };
+    }
+    let Some(regs) = regs else {
+        RUN.with(|r| r.set(None));
+        return;
+    };
+    let now = Instant::now();
+    let first = match RUN.with(|r| r.get()) {
+        Some((first, prev)) if prev == regs => first,
+        _ => now,
+    };
+    RUN.with(|r| r.set(Some((first, regs))));
+    if let Some(d) = backoff(now - first) {
+        blocking(|| std::thread::sleep(d));
+    }
+}
+
 pub fn yield_thread() {
     let mut g = KERNEL.lock();
     if let Some(t) = current_kthread(&g) {

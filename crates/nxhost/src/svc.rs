@@ -29,7 +29,19 @@ pub fn current_guest_fp() -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dispatch(f: &mut Frame) {
+    if f.x[16] == nxabi::SVC_SPIN as u64 {
+        kernel::spin_wait(f.x[30]);
+        return;
+    }
     GUEST_FP.with(|c| c.set(f.x[29]));
+    let yielding = f.x[16] == 0x0B && f.x[0] as i64 <= 0;
+    if yielding {
+        let mut regs = [0; 10];
+        regs.copy_from_slice(&f.x[19..29]);
+        kernel::yield_backoff(Some(regs));
+    } else {
+        kernel::yield_backoff(None);
+    }
     kernel::sched_point();
     dispatch_inner(f);
     kernel::sched_point();
