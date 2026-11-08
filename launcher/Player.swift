@@ -6,9 +6,11 @@ private let notCountries: Set<String> = ["AC", "CP", "DG", "EA", "EU", "EZ", "IC
 
 let countryCodes: [String] = Locale.Region.isoRegions.map(\.identifier)
     .filter { $0.count == 2 && $0.allSatisfy(\.isLetter) && !notCountries.contains($0) }
-    .sorted { countryName($0).localizedCompare(countryName($1)) == .orderedAscending }
+    .sorted { countryName($0).compare(countryName($1), locale: appLocale) == .orderedAscending }
 
-func countryName(_ code: String) -> String { Locale.current.localizedString(forRegionCode: code) ?? code }
+let appLocale = Locale(identifier: Bundle.main.preferredLocalizations.first ?? "en")
+
+func countryName(_ code: String) -> String { appLocale.localizedString(forRegionCode: code) ?? code }
 
 func playerNickname(nextendo: Bool, source: String, custom: String, nextendoName: String) -> String {
     let custom = custom.trimmingCharacters(in: .whitespaces)
