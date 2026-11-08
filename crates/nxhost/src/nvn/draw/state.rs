@@ -471,7 +471,9 @@ impl Arena {
         if self.used.last().is_none_or(|b| self.offset + size > b.0.length()) {
             let b = self.free.iter().position(|b| b.0.length() >= size).map(|i| self.free.swap_remove(i)).unwrap_or_else(|| {
                 let dev = &gfx::gpu().device.0;
-                Shared(dev.newBufferWithLength_options(size.max(CHUNK), MTLResourceOptions::StorageModeShared).expect("scratch buffer"))
+                let b = dev.newBufferWithLength_options(size.max(CHUNK), MTLResourceOptions::StorageModeShared).expect("scratch buffer");
+                gfx::make_resident(&b);
+                Shared(b)
             });
             self.used.push(b);
             self.offset = 0;

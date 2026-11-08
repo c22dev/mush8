@@ -170,6 +170,7 @@ pub struct Gpu {
     pub device: Shared<Device>,
     pub zeros: Shared<Buffer>,
     pub queue: Shared<ProtocolObject<dyn MTLCommandQueue>>,
+    residency: Option<Shared<ProtocolObject<dyn MTLResidencySet>>>,
     present: Shared<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Shared<ProtocolObject<dyn MTLSamplerState>>,
 }
@@ -184,8 +185,38 @@ pub fn gpu() -> &'static Gpu {
         let queue = device.newCommandQueue().expect("command queue");
         let (present, sampler) = make_present_pipeline(&device);
         let zeros = device.newBufferWithLength_options(0x10000, MTLResourceOptions::StorageModeShared).expect("zero buffer");
-        Gpu { device: Shared(device), zeros: Shared(zeros), queue: Shared(queue), present: Shared(present), sampler: Shared(sampler) }
+        let residency = make_residency(&device, &queue);
+        if let Some(r) = &residency {
+            r.0.addAllocation(ProtocolObject::from_ref(&*zeros));
+            r.0.commit();
+            r.0.requestResidency();
+        }
+        Gpu { device: Shared(device), zeros: Shared(zeros), queue: Shared(queue), residency, present: Shared(present), sampler: Shared(sampler) }
     })
+}
+
+fn make_residency(device: &Device, queue: &ProtocolObject<dyn MTLCommandQueue>) -> Option<Shared<ProtocolObject<dyn MTLResidencySet>>> {
+    use objc2_foundation::NSObjectProtocol;
+    if std::env::var_os("NX_RESIDENCY").is_some_and(|v| v == "0")
+        || !device.respondsToSelector(objc2::sel!(newResidencySetWithDescriptor:error:))
+        || !queue.respondsToSelector(objc2::sel!(addResidencySet:))
+    {
+        return None;
+    }
+    let set = device.newResidencySetWithDescriptor_error(&MTLResidencySetDescriptor::new()).ok()?;
+    queue.addResidencySet(&set);
+    Some(Shared(set))
+}
+
+pub fn residency() -> bool {
+    gpu().residency.is_some()
+}
+
+pub fn make_resident(b: &Buffer) {
+    if let Some(r) = &gpu().residency {
+        r.0.addAllocation(ProtocolObject::from_ref(b));
+        r.0.commit();
+    }
 }
 
 const PRESENT_MSL: &str = r#"

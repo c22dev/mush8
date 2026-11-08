@@ -241,8 +241,10 @@ impl Replay<'_> {
                 enc.useResource_usage(ProtocolObject::from_ref(&*chunk.buffer.0), MTLResourceUsage::Read | MTLResourceUsage::Write);
             }
         }
-        for b in &self.e.arena.used {
-            enc.useResource_usage(ProtocolObject::from_ref(&*b.0), MTLResourceUsage::Read);
+        if !gfx::residency() {
+            for b in &self.e.arena.used {
+                enc.useResource_usage(ProtocolObject::from_ref(&*b.0), MTLResourceUsage::Read);
+            }
         }
         unsafe {
             enc.setBytes_length_atIndex(NonNull::from(&res).cast(), size_of::<Res>(), 0);

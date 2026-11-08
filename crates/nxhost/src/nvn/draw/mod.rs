@@ -373,6 +373,9 @@ impl Replay<'_> {
     }
 
     fn use_chunk(&mut self, b: &Shared<state::Buffer>) {
+        if gfx::residency() {
+            return;
+        }
         if let Some(p) = &mut self.pass {
             p.enc.useResource_usage_stages(ProtocolObject::from_ref(&*b.0), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
             p.chunks += 1;
@@ -487,11 +490,13 @@ impl Replay<'_> {
             self.flush_clears();
             let enc = gfx::begin_pass(&self.cb, &Attachments { colors, depth, subs, depth_sub }).ok_or("no encoder")?;
             let chunks: Vec<_> = self.e.arena.used.clone();
-            for c in &chunks {
-                enc.useResource_usage_stages(ProtocolObject::from_ref(&*c.0), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
+            if !gfx::residency() {
+                for c in &chunks {
+                    enc.useResource_usage_stages(ProtocolObject::from_ref(&*c.0), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
+                }
+                let z = &gfx::gpu().zeros.0;
+                enc.useResource_usage_stages(ProtocolObject::from_ref(&**z), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
             }
-            let z = &gfx::gpu().zeros.0;
-            enc.useResource_usage_stages(ProtocolObject::from_ref(&**z), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
             self.pass = Some(Pass { enc, targets: Targets { colors: fmts, depth: dfmt, stencil }, size, heap: 0, chunks: chunks.len(), fresh, keys, fixed: None });
         }
         Ok(())
