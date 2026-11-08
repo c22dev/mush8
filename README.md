@@ -17,7 +17,7 @@ Because Nintendo ninjas are always watching, you will need your own dump :
 - a `Firmware` folder dumped from your Switch (fonts, Miis)
 - optionally, the Booster Course Pass, named `dlc.nsp`
 
-- optionally, your Miis : the `MiiDatabase.dat` from your Switch's system save `8000000000000030`, or single `.charinfo` (0x58 bytes) / `.storedata` (0x44 bytes) Mii files. Import them under Miis in the launcher (they go in a `miis` folder next to your game files) and they show up next to the default Miis in the game
+- optionally, your Miis : the `MiiDatabase.dat` from your Switch's system save `8000000000000030`, or single `.charinfo` (0x58 bytes) / `.storedata` (0x44 bytes) Mii files. Import them under Player in the launcher (they go in a `miis` folder next to your game files) and they show up next to the default Miis in the game
 
 Mush8 will then asks for them : on macOS pick the folder holding them in the launcher, on iOS import them from the app (or copy them in Files → On My iPhone → Mush8)
 
@@ -86,12 +86,12 @@ Any controller normally works (Switch Pro, Joy-Con, DualSense, Xbox...). On macO
 
 An iPhone can be a controller too : open Mush8 on it and tap "Use as a controller". It finds the other Mush8 instance on the same Wi-Fi and joins as the next player
 
-Any browser can be a controller too : turn "Remote controller" and "Browser controllers" on in the launcher and the address shown on the other device
+Any browser can be a controller too : turn "Remote controllers" and "Web controllers" on under Multiplayer in the launcher and the address shown on the other device
 
 On macOS, if your controller or a part of it (for example rumble) does not work, set "Gamepad driver" to SDL in the launcher
 
 ## Mods
-Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS. Mods load in name order; later mods win file conflicts.
+Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Mods in the launcher. Mods load in name order; later mods win file conflicts.
 
 Use Browse GameBanana to search Mario Kart 8 Deluxe mods by name, section, URL or ID, then choose a file to download and install. The app supports ZIP, 7z and RAR, displays download progress, and supports cancellation. Existing mods are not overwritten. Downloads are limited to 512 MiB and extraction to 2 GiB / 20,000 entries. The flow was informed by [SimpleModDownloader](https://github.com/PoloNX/SimpleModDownloader).
 
