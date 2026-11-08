@@ -61,18 +61,17 @@ impl Filter {
 
 pub fn friend_record(id: u64, user: Option<&[u8]>, f: &Friend) -> [u8; FRIEND_SIZE] {
     let mut r = [0u8; FRIEND_SIZE];
+    let mut friend_uid = [0u8; 16];
+    friend_uid[..8].copy_from_slice(&FRIEND_UID_HIGH.to_le_bytes());
+    friend_uid[8..].copy_from_slice(&id.to_le_bytes());
     match user.filter(|u| u.len() >= 16) {
         Some(u) => r[..16].copy_from_slice(&u[..16]),
-        None => {
-            r[..8].copy_from_slice(&FRIEND_UID_HIGH.to_le_bytes());
-            r[8..16].copy_from_slice(&id.to_le_bytes());
-        }
+        None => r[..16].copy_from_slice(&friend_uid),
     }
     r[0x10..0x18].copy_from_slice(&id.to_le_bytes());
     let name = truncated(&f.name, 32);
     r[0x18..0x18 + name.len()].copy_from_slice(name);
-    let uid: [u8; 16] = r[..16].try_into().unwrap();
-    r[PRESENCE..PRESENCE + 16].copy_from_slice(&uid);
+    r[PRESENCE..PRESENCE + 16].copy_from_slice(&friend_uid);
     r[PRESENCE + 0x10..PRESENCE + 0x18].copy_from_slice(&i64::MAX.to_le_bytes());
     let status = if f.online() { STATUS_ONLINE_PLAY } else { STATUS_OFFLINE };
     r[PRESENCE + 0x18..PRESENCE + 0x1C].copy_from_slice(&status.to_le_bytes());
@@ -215,7 +214,8 @@ mod tests {
         let user = [7u8; 16];
         let r = friend_record(5, Some(&user), &friend(0, 0));
         assert_eq!(&r[..16], &user);
-        assert_eq!(&r[0x40..0x50], &user);
+        assert_eq!(&r[0x40..0x48], &FRIEND_UID_HIGH.to_le_bytes());
+        assert_eq!(&r[0x48..0x50], &5u64.to_le_bytes());
         assert_eq!(r[0x58], 0);
         assert_eq!(r[0x5C], 0);
         assert!(r[0x60..0x120].iter().all(|&b| b == 0));
