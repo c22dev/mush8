@@ -447,6 +447,9 @@ pub fn start_thread(t: Arc<Thread>, args: [u64; 4]) -> std::io::Result<std::thre
         KERNEL.wake_core(&g, t.sched_core());
     }
     std::thread::Builder::new().name(format!("guest-{:#x}", t.id)).stack_size(1 << 20).spawn(move || {
+        if std::env::var_os("NX_GUEST_QOS").is_none_or(|v| v != "0") {
+            unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
+        }
         crate::diag::install_altstack();
         let mut ctx = GuestThread::new(t.handle, t.tlr);
         ctx.install();
