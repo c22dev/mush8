@@ -10,7 +10,7 @@ SHADERS=0
 ROMFS=0
 for a in "$@"; do
   case "$a" in
-    --install|--ipa) MODE="$a" ;;
+    --install|--ipa|--signed-ipa) MODE="$a" ;;
     --shaders) SHADERS=1 ;;
     --romfs) ROMFS=1 ;;
     *) DEVICE="$a" ;;
@@ -149,12 +149,12 @@ fi
 codesign --verify "$APP"
 echo "built: $APP ($(du -sh "$APP" | cut -f1))"
 
-if [ "$MODE" = "--ipa" ]; then
+if [ "$MODE" = "--ipa" ] || [ "$MODE" = "--signed-ipa" ]; then
   STAGE="$(mktemp -d)"
   mkdir "$STAGE/Payload"
   cp -cRp "$APP" "$STAGE/Payload/"
   mkdir -p build
-  IPA="$PWD/build/Mush8.ipa"
+  IPA="$PWD/build/Mush8${IPA_NAME:+-$IPA_NAME}.ipa"
   rm -f "$IPA"
   (cd "$STAGE" && zip -qry "$IPA" Payload)
   rm -rf "$STAGE"
