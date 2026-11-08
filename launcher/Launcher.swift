@@ -802,6 +802,7 @@ struct LauncherView: View {
                 let login = try await Nextendo.gameLogin()
                 s.nextendoPid = login.pid
                 s.nextendoName = login.name
+                if s.country.isEmpty && !login.country.isEmpty { s.country = login.country }
                 s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
                 setenv("NX_NEXTENDO_ACCESS", login.access, 1)

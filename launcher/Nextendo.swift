@@ -12,6 +12,7 @@ struct NextendoLogin {
     let name: String
     let token: String
     let access: String
+    let country: String
 }
 
 enum Nextendo {
@@ -20,6 +21,8 @@ enum Nextendo {
     static let authorize = URL(string: "https://nextendo.network/oauth/authorize")!
     static let tokenURL = URL(string: "https://nextendo.network/api/oauth/token")!
     static let nexTokenURL = URL(string: "https://nextendo.network/api/nex-token")!
+    static let meURL = URL(string: "https://nextendo.network/api/me")!
+    static let userInfoURL = URL(string: "https://nextendo.network/api/oauth/userinfo")!
     static let onlineStatusURL = URL(string: "https://nextendo.network/api/online-status")!
     static let callbackPort: UInt16 = 47823
 
@@ -83,7 +86,18 @@ enum Nextendo {
         guard let nex = json["nex_token"] as? String, !nex.isEmpty, let pid = (json["pid"] as? NSNumber)?.uint64Value, pid != 0 else {
             throw Failure("Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account")
         }
-        return NextendoLogin(pid: pid, name: json["username"] as? String ?? "", token: nex, access: access)
+        func lookup(_ url: URL) -> URLRequest {
+            var r = URLRequest(url: url, timeoutInterval: 5)
+            r.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+            return r
+        }
+        let (meRequest, infoRequest) = (lookup(meURL), lookup(userInfoURL))
+        async let me = try? send(meRequest)
+        async let info = try? send(infoRequest)
+        let account = ((await me)?["account"] as? [String: Any]) ?? [:]
+        let display = ((await info)?["display_name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        let country = (account["country"] as? String ?? "").uppercased()
+        return NextendoLogin(pid: pid, name: display.isEmpty ? json["username"] as? String ?? "" : display, token: nex, access: access, country: country)
     }
 
     static func freshAccess() async throws -> String {
