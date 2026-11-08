@@ -29,6 +29,22 @@ func miiIDs(_ data: Data) -> [Data] {
 
 func miisFolder(in folder: URL) -> URL { folder.appendingPathComponent("miis") }
 
+let accountMiiName = "nextendo.storedata"
+
+func firstImportedMii(in dir: URL) -> Data? {
+    let names = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [])
+        .filter { $0.caseInsensitiveCompare(accountMiiName) != .orderedSame }
+        .sorted { ($0.caseInsensitiveCompare(miiDatabaseName) != .orderedSame ? 1 : 0, $0) < ($1.caseInsensitiveCompare(miiDatabaseName) != .orderedSame ? 1 : 0, $1) }
+    for name in names {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(name)) else { continue }
+        if isMiiDatabase(data), data[data.startIndex + nfdbSize - 3] > 0 {
+            return data.subdata(in: data.startIndex + 4..<data.startIndex + 4 + storeDataSize)
+        }
+        if data.count == storeDataSize { return data }
+    }
+    return nil
+}
+
 private func miiHeader(at url: URL) -> Data? {
     guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else { return nil }
     if size == charInfoSize || size == storeDataSize { return try? Data(contentsOf: url) }

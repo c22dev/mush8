@@ -22,6 +22,7 @@ enum Nextendo {
     static let tokenURL = URL(string: "https://nextendo.network/api/oauth/token")!
     static let nexTokenURL = URL(string: "https://nextendo.network/api/nex-token")!
     static let meURL = URL(string: "https://nextendo.network/api/me")!
+    static let profileURL = URL(string: "https://nextendo.network/api/profile")!
     static let userInfoURL = URL(string: "https://nextendo.network/api/oauth/userinfo")!
     static let renewedRefresh = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Mush8/nextendo-refresh")
     static let onlineStatusURL = URL(string: "https://nextendo.network/api/online-status")!
@@ -104,6 +105,44 @@ enum Nextendo {
         let display = ((await info)?["display_name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         let country = (account["country"] as? String ?? "").uppercased()
         return NextendoLogin(pid: pid, name: display.isEmpty ? json["username"] as? String ?? "" : display, token: nex, access: access, country: country)
+    }
+
+    static func syncMii(folder: URL, login: NextendoLogin) async {
+        let dir = miisFolder(in: folder)
+        let file = dir.appendingPathComponent(accountMiiName)
+        let tokens = [login.token, login.access]
+        for token in tokens {
+            var get = URLRequest(url: profileURL, timeoutInterval: 5)
+            get.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            guard let json = try? await send(get), json.keys.contains("profile") else { continue }
+            let profile = json["profile"] as? [String: Any] ?? [:]
+            if json["profile"] != nil, !(json["profile"] is [String: Any]), !(json["profile"] is NSNull) { return }
+            let stored = profile["mii"]
+            if let text = stored as? String, !text.isEmpty {
+                guard let mii = Data(base64Encoded: text), mii.count == storeDataSize else { return }
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                if (try? Data(contentsOf: file)) != mii { try? mii.write(to: file, options: .atomic) }
+                return
+            }
+            guard stored == nil || stored is NSNull || (stored as? String)?.isEmpty == true else { return }
+            try? FileManager.default.removeItem(at: file)
+            guard let mii = firstImportedMii(in: dir) else { return }
+            var body = profile
+            body["mii"] = mii.base64EncodedString()
+            guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+            let order = [token] + tokens.filter { $0 != token }
+            Task.detached {
+                for writer in order {
+                    var put = URLRequest(url: profileURL, timeoutInterval: 10)
+                    put.httpMethod = "PUT"
+                    put.setValue("Bearer \(writer)", forHTTPHeaderField: "Authorization")
+                    put.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    put.httpBody = data
+                    if (try? await send(put)) != nil { return }
+                }
+            }
+            return
+        }
     }
 
     static func freshAccess() async throws -> String {

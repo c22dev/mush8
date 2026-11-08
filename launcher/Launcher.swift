@@ -803,6 +803,7 @@ struct LauncherView: View {
                 s.nextendoPid = login.pid
                 s.nextendoName = login.name
                 if s.country.isEmpty && !login.country.isEmpty { s.country = login.country }
+                await Nextendo.syncMii(folder: s.folderURL, login: login)
                 s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
                 setenv("NX_NEXTENDO_ACCESS", login.access, 1)
