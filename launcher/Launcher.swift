@@ -534,7 +534,7 @@ struct LauncherView: View {
     var modeName: String {
         switch s.network {
         case "lan": return "LAN"
-        case "lanplay": return "Online"
+        case "lanplay": return "Lan-Play"
         case "wireless": return "Wireless"
         case "nextendo": return "Nextendo"
         default: return "Off"
@@ -547,7 +547,7 @@ struct LauncherView: View {
                 Picker("Mode", selection: $s.network) {
                     Text("Off").tag("off")
                     Text("LAN").tag("lan")
-                    Text("Online").tag("lanplay")
+                    Text("Lan-Play").tag("lanplay")
                     Text("Wireless (nearby)").tag("wireless")
                     Text("Nextendo").tag("nextendo")
                 }
