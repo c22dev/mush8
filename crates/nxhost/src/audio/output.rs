@@ -5,7 +5,7 @@ use super::system::SystemSink;
 use objc2_audio_toolbox::{
     AURenderCallbackStruct, AUSpatialMixerOutputType, AUSpatialMixerSourceMode, AUSpatializationAlgorithm, AudioComponentDescription, AudioComponentFindNext, AudioComponentInstanceDispose,
     AudioComponentInstanceNew, AudioOutputUnitStart, AudioOutputUnitStop, AudioUnit, AudioUnitInitialize, AudioUnitPropertyID, AudioUnitRender, AudioUnitRenderActionFlags, AudioUnitScope,
-    AudioUnitSetProperty, kAudioUnitManufacturer_Apple, kAudioUnitProperty_AudioChannelLayout, kAudioUnitProperty_ElementCount, kAudioUnitProperty_MaximumFramesPerSlice,
+    AudioUnitGetProperty, AudioUnitSetProperty, kAudioOutputUnitProperty_IsRunning, kAudioUnitManufacturer_Apple, kAudioUnitProperty_AudioChannelLayout, kAudioUnitProperty_ElementCount, kAudioUnitProperty_MaximumFramesPerSlice,
     kAudioUnitProperty_SetRenderCallback, kAudioUnitProperty_SpatialMixerOutputType, kAudioUnitProperty_SpatialMixerSourceMode,
     kAudioUnitProperty_SpatializationAlgorithm, kAudioUnitProperty_StreamFormat, kAudioUnitProperty_UsesInternalReverb, kAudioUnitScope_Global, kAudioUnitScope_Input, kAudioUnitScope_Output,
     kAudioUnitSubType_SpatialMixer, kAudioUnitType_Mixer, kAudioUnitType_Output,
@@ -20,7 +20,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,7 @@ const MAX_FRAMES: usize = 4096;
 const FADE_OUT: f64 = 0.005;
 pub(super) const FADE_IN: f64 = 0.04;
 const MUTE_TIMEOUT: Duration = Duration::from_millis(50);
+const WATCH: Duration = Duration::from_millis(500);
 
 #[cfg(target_os = "macos")]
 const OUTPUT_SUBTYPE: u32 = objc2_audio_toolbox::kAudioUnitSubType_DefaultOutput;
@@ -281,6 +282,7 @@ struct Director {
     gate: Arc<Gate>,
     system: Option<SystemSink>,
     sink: Option<Sink>,
+    stalled: bool,
 }
 
 impl Director {
@@ -325,6 +327,36 @@ impl Director {
         self.sink = Some(to);
     }
 
+    fn stopped(&self) -> bool {
+        match self.sink {
+            Some(Sink::Mixer(_)) => {
+                let (mut running, mut size) = (1u32, 4u32);
+                let status = unsafe { AudioUnitGetProperty(self.out.0, kAudioOutputUnitProperty_IsRunning, kAudioUnitScope_Global, 0, NonNull::from(&mut running).cast(), NonNull::from(&mut size)) };
+                status == 0 && running == 0
+            }
+            Some(Sink::System(_)) => self.system.as_ref().is_some_and(|s| s.stopped()),
+            None => false,
+        }
+    }
+
+    fn revive(&mut self) {
+        if !self.stopped() {
+            self.stalled = false;
+            return;
+        }
+        if !self.stalled {
+            eprintln!("[audio] output stopped by the system, restarting it");
+            self.stalled = true;
+        }
+        match self.sink {
+            Some(Sink::Mixer(_)) => {
+                unsafe { AudioOutputUnitStart(self.out.0) };
+            }
+            Some(Sink::System(latency)) => self.system.as_mut().unwrap().start(latency as f64 / 1000.0),
+            None => {}
+        }
+    }
+
     fn run(mut self, tx: Sender<Event>, rx: Receiver<Event>) {
         let mut watcher = Watcher::new(Box::new(move || {
             let _ = tx.send(Event::RouteChanged);
@@ -334,8 +366,10 @@ impl Director {
             if self.sink != Some(to) {
                 self.switch(to);
             }
-            if !matches!(rx.recv(), Ok(Event::RouteChanged)) {
-                break;
+            match rx.recv_timeout(WATCH) {
+                Ok(Event::RouteChanged) => {}
+                Err(RecvTimeoutError::Timeout) => self.revive(),
+                _ => break,
             }
         }
         if let Some(s) = &mut self.system {
@@ -388,7 +422,7 @@ pub fn start(rate: u32, frames: usize, source: Source) -> Output {
             .name("audio-route".into())
             .spawn(move || {
                 let system = if spatial { SystemSink::new(f, rate) } else { None };
-                Director { out: Arc::new(out), mixer: Arc::new(mixer), gate, system, sink: None }.run(t, rx)
+                Director { out: Arc::new(out), mixer: Arc::new(mixer), gate, system, sink: None, stalled: false }.run(t, rx)
             })
             .unwrap();
         Ok(Engine { router, events: tx })
