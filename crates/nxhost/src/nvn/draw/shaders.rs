@@ -11,7 +11,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 pub type Function = objc2::runtime::ProtocolObject<dyn MTLFunction>;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stage {
     pub hash: u64,
     pub code: u64,
@@ -110,37 +110,53 @@ fn compute_stage(code: u64, ctl: u64) -> Option<Stage> {
     Some(Stage { hash: fnv1a(blob) ^ 0xC0, code, len, constants: code + len as u64, fragment: false, local_size: Some(local_size) })
 }
 
+fn read_stage(code: u64, ctl: u64) -> Option<Stage> {
+    if rd32(code) != 0x1234_5678 {
+        return compute_stage(code, ctl);
+    }
+    let mut len = rd32(ctl + 0x700) as u64;
+    let pool_end = STATE.lock().unwrap().pool_at(code).map(|(_, p)| p.cpu + p.size)?;
+    len = len.clamp(0x100, 0x10_0000).min(pool_end - code);
+    let blob = unsafe { std::slice::from_raw_parts(code as *const u8, len as usize) };
+    let w0 = u32::from_le_bytes(blob[0x30..0x34].try_into().unwrap());
+    Some(Stage {
+        hash: fnv1a(&blob[0x30..]),
+        code,
+        len: len as usize,
+        constants: code + rd32(ctl + 0x700) as u64,
+        fragment: (w0 >> 10) & 0xF == 5,
+        local_size: None,
+    })
+}
+
+fn validate_stage(code: u64, ctl: u64, cached: Option<Stage>) {
+    static ENABLED: LazyLock<bool> = LazyLock::new(|| std::env::var_os("NX_VALIDATE_STAGE_CACHE").is_some());
+    if !*ENABLED { return; }
+    let current = read_stage(code, ctl);
+    if current != cached {
+        static REPORTED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if REPORTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 32 {
+            eprintln!("[shader] stale stage cache code {code:#x} ctl {ctl:#x}: cached {cached:?}, current {current:?}");
+        }
+    }
+}
+
 impl Shaders {
     pub fn stage(&mut self, code: u64, ctl: u64) -> Option<Stage> {
         let quick = unsafe { std::slice::from_raw_parts((code + 0x30) as *const u8, 0x60) };
         for slot in &self.recent {
             if slot.live && slot.code == code && slot.ctl == ctl && slot.quick.as_slice() == quick {
+                validate_stage(code, ctl, slot.stage);
                 return slot.stage;
             }
         }
         let qh = fnv1a(quick);
         let key = (code, ctl ^ qh);
         let s = if let Some(s) = self.stages.get(&key) {
+            validate_stage(code, ctl, *s);
             *s
         } else {
-            let s = (|| {
-                if rd32(code) != 0x1234_5678 {
-                    return compute_stage(code, ctl);
-                }
-                let mut len = rd32(ctl + 0x700) as u64;
-                let pool_end = STATE.lock().unwrap().pool_at(code).map(|(_, p)| p.cpu + p.size)?;
-                len = len.clamp(0x100, 0x10_0000).min(pool_end - code);
-                let blob = unsafe { std::slice::from_raw_parts(code as *const u8, len as usize) };
-                let w0 = u32::from_le_bytes(blob[0x30..0x34].try_into().unwrap());
-                Some(Stage {
-                    hash: fnv1a(&blob[0x30..]),
-                    code,
-                    len: len as usize,
-                    constants: code + rd32(ctl + 0x700) as u64,
-                    fragment: (w0 >> 10) & 0xF == 5,
-                    local_size: None,
-                })
-            })();
+            let s = read_stage(code, ctl);
             self.stages.insert(key, s);
             s
         };
