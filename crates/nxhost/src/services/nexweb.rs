@@ -15,6 +15,10 @@ const PRESENCE_MIN_GAP: Duration = Duration::from_secs(3);
 const MAX_DEPTH: usize = 64;
 const ACCESS_LIFE: Duration = Duration::from_secs(50 * 60);
 const RENEW_RETRY: Duration = Duration::from_secs(5 * 60);
+const HISTORY_TICK: Duration = Duration::from_secs(15);
+const HISTORY_EVERY: Duration = Duration::from_secs(300);
+const HISTORY_FIRST: Duration = Duration::from_secs(60);
+const MK8_NAME: &str = "Mario Kart 8 Deluxe";
 
 fn signed_in_access() -> String {
     std::env::var("NX_NEXTENDO_ACCESS").unwrap_or_default().trim().to_string()
@@ -507,11 +511,84 @@ pub fn set_presence(app_field: &[u8]) {
     PRESENCE_CHANGED.notify_all();
 }
 
+pub fn history_seconds(body: &str) -> Option<u64> {
+    let root = Json::parse(body)?;
+    let list = root.get("history");
+    matches!(list, Json::Arr(_)).then_some(())?;
+    Some(list.arr().iter().find(|h| u64::from_str_radix(h.get("title_id").str(), 16).ok() == Some(MK8)).map_or(0, |h| h.get("seconds").u64()))
+}
+
+pub fn history_body(seconds: u64, last_played: &str) -> String {
+    format!(
+        "{{\"history\":[{{\"title_id\":{},\"name\":{},\"icon\":\"\",\"seconds\":{seconds},\"last_played\":{}}}]}}",
+        json_str(&format!("{MK8:016x}")),
+        json_str(MK8_NAME),
+        json_str(last_played)
+    )
+}
+
+pub fn iso_utc(unix: u64) -> String {
+    let (days, secs) = ((unix / 86400) as i64, unix % 86400);
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + (month <= 2) as i64;
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60)
+}
+
+fn history_loop() {
+    let base = loop {
+        match http("GET", "/api/history", None) {
+            Ok((200, body)) => match history_seconds(&String::from_utf8_lossy(&body)) {
+                Some(seconds) => break seconds,
+                None => eprintln!("[nextendo] could not read play time: unexpected reply"),
+            },
+            reply => eprintln!("[nextendo] could not read play time: {}", why(&reply)),
+        }
+        std::thread::sleep(HISTORY_EVERY);
+    };
+    let mut played = Duration::ZERO;
+    let mut tick = Instant::now();
+    let mut pushed = Instant::now();
+    let mut wait = HISTORY_FIRST.min(HISTORY_EVERY);
+    let mut logged: Option<bool> = None;
+    loop {
+        std::thread::sleep(HISTORY_TICK);
+        played += tick.elapsed().min(HISTORY_TICK * 2);
+        tick = Instant::now();
+        if pushed.elapsed() < wait {
+            continue;
+        }
+        pushed = Instant::now();
+        wait = HISTORY_EVERY;
+        let body = history_body(base + played.as_secs(), &iso_utc(crate::services::nextrace::now()));
+        let reply = send(&nextendo::token(), "PUT", "/api/history", Some(&body));
+        if matches!(reply, Ok((401 | 403, _))) {
+            eprintln!("[nextendo] Nextendo does not let Mush8 save play time: {}", why(&reply));
+            return;
+        }
+        let ok = matches!(reply, Ok((200..=299, _)));
+        if logged != Some(ok) {
+            match ok {
+                true => eprintln!("[nextendo] play time saved ({} min this session)", played.as_secs() / 60),
+                false => eprintln!("[nextendo] could not save play time: {}", why(&reply)),
+            }
+            logged = Some(ok);
+        }
+    }
+}
+
 pub fn start() {
     if !active() {
         return;
     }
     std::thread::spawn(publish_loop);
+    std::thread::spawn(history_loop);
     friends(Duration::ZERO);
 }
 
@@ -553,6 +630,22 @@ mod tests {
         field[3] = 7;
         assert_eq!(presence_body(&field, "Worldwide"), r#"{"status":2,"app_field":"SGkABw==","app_id":"0100152000022000","app_detail":"Worldwide"}"#);
         assert_eq!(presence_body(&[0; 0xC0], ""), r#"{"status":2,"app_field":"","app_id":"0100152000022000","app_detail":""}"#);
+    }
+
+    #[test]
+    fn play_time_reads_and_writes_mk8() {
+        let body = r#"{"history":[{"title_id":"01006a800016e000","seconds":50},{"title_id":"0100152000022000","name":"Mario Kart 8 Deluxe","seconds":4200,"last_played":"2026-11-07T22:00:00Z"}]}"#;
+        assert_eq!(history_seconds(body), Some(4200));
+        assert_eq!(history_seconds(r#"{"history":[]}"#), Some(0));
+        assert_eq!(history_seconds(r#"{"error":"x"}"#), None);
+        assert_eq!(history_body(4320, "2026-11-08T01:02:03Z"), r#"{"history":[{"title_id":"0100152000022000","name":"Mario Kart 8 Deluxe","icon":"","seconds":4320,"last_played":"2026-11-08T01:02:03Z"}]}"#);
+    }
+
+    #[test]
+    fn iso_dates_are_utc() {
+        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(iso_utc(951782400), "2000-02-29T00:00:00Z");
+        assert_eq!(iso_utc(1794099723), "2026-11-08T01:02:03Z");
     }
 
     #[test]
