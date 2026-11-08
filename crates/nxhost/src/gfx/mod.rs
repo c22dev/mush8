@@ -3,6 +3,7 @@
 #[cfg(target_os = "ios")]
 mod ios;
 pub mod bc;
+pub mod keyboard;
 pub mod overlay;
 #[cfg(target_os = "ios")]
 mod touch;
@@ -261,7 +262,7 @@ pub fn run_app(title: &str, width: f64, height: f64) -> ! {
                 _ => {}
             }
         }
-        std::ptr::null_mut()
+        if keyboard::typing() { e.as_ptr() } else { std::ptr::null_mut() }
     });
     let close = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSNotification>| std::process::exit(0));
     let observer = unsafe {

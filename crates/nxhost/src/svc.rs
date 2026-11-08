@@ -155,7 +155,7 @@ fn dispatch_inner(f: &mut Frame) {
         0x13 => map_shared_memory(x[0] as u32, x[1], x[2]),
         0x14 => rc::OK,
         0x15 => {
-            let h = KERNEL.lock().add(Obj::TransferMemory);
+            let h = KERNEL.lock().add(Obj::TransferMemory { addr: x[1], size: x[2] });
             f.x[1] = h as u64;
             rc::OK
         }

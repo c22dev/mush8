@@ -64,7 +64,7 @@ pub enum Obj {
     Session(Arc<crate::ipc::Session>),
     ResourceLimit,
     SharedMemory(Arc<SharedMemory>),
-    TransferMemory,
+    TransferMemory { addr: u64, size: u64 },
 }
 
 struct Waiter {
