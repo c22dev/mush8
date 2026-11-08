@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSString, NSURL};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 
 pub type Pipeline = objc2::runtime::ProtocolObject<dyn MTLRenderPipelineState>;
 
@@ -184,7 +184,7 @@ pub struct Targets {
     pub stencil: bool,
 }
 
-fn blend_factor(f: u32) -> MTLBlendFactor {
+pub(super) fn blend_factor(f: u32) -> MTLBlendFactor {
     use MTLBlendFactor as B;
     match f {
         1 => B::Zero,
@@ -210,7 +210,7 @@ fn blend_factor(f: u32) -> MTLBlendFactor {
     }
 }
 
-fn blend_op(e: u32) -> MTLBlendOperation {
+pub(super) fn blend_op(e: u32) -> MTLBlendOperation {
     match e {
         2 => MTLBlendOperation::Subtract,
         3 => MTLBlendOperation::ReverseSubtract,
@@ -280,15 +280,57 @@ enum Slot {
 }
 
 static PREWARMED: LazyLock<Mutex<HashMap<Recorded, Slot>>> = LazyLock::new(Default::default);
+static PREWARM_CHANGED: Condvar = Condvar::new();
 const PREWARM_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
 
 struct Building<'a>(&'a Recorded);
 
 impl Drop for Building<'_> {
     fn drop(&mut self) {
-        let mut m = PREWARMED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
         if matches!(m.get(self.0), Some(Slot::Building)) {
             m.remove(self.0);
+            PREWARM_CHANGED.notify_all();
+        }
+    }
+}
+
+enum Claim {
+    Ready(Shared<Pipeline>, Option<std::time::Duration>),
+    Compiling,
+    Build,
+    Record,
+}
+
+fn claim(r: &Recorded, wait: bool, block: fn(&mut dyn FnMut())) -> Claim {
+    let mut waited = None;
+    let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        match m.get(r) {
+            Some(Slot::Ready(_)) => {
+                let Some(Slot::Ready(p)) = m.insert(r.clone(), Slot::Claimed) else { unreachable!() };
+                return Claim::Ready(p, waited.map(|t0: std::time::Instant| t0.elapsed()));
+            }
+            Some(Slot::Building) if !wait => return Claim::Compiling,
+            Some(Slot::Building) => {
+                let left = PREWARM_WAIT.saturating_sub(waited.get_or_insert_with(std::time::Instant::now).elapsed());
+                if left.is_zero() {
+                    m.insert(r.clone(), Slot::Claimed);
+                    return Claim::Build;
+                }
+                drop(m);
+                let mut woke = None;
+                block(&mut || {
+                    let m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+                    woke = Some(PREWARM_CHANGED.wait_timeout_while(m, left, |m| matches!(m.get(r), Some(Slot::Building))).unwrap_or_else(PoisonError::into_inner).0);
+                });
+                m = woke.unwrap_or_else(|| PREWARMED.lock().unwrap_or_else(PoisonError::into_inner));
+            }
+            Some(Slot::Claimed) => return Claim::Build,
+            None => {
+                m.insert(r.clone(), Slot::Claimed);
+                return Claim::Record;
+            }
         }
     }
 }
@@ -328,34 +370,22 @@ impl States {
         let (cs, cm, blend) = (st.color_state, st.channel_mask, st.blend);
         if let Some(r) = Recorded::of(vs, fs, t, cs, cm, &blend) {
             let wait = wait || super::shaders::sync_mode();
-            let t0 = std::time::Instant::now();
-            loop {
-                let mut m = PREWARMED.lock().unwrap();
-                match m.get(&r) {
-                    Some(Slot::Ready(_)) => {
-                        let Some(Slot::Ready(p)) = m.insert(r, Slot::Claimed) else { unreachable!() };
-                        drop(m);
-                        self.pipelines.insert(key, Some(p.clone()));
-                        return Ok(p);
+            match claim(&r, wait, |f| crate::kernel::blocking(f)) {
+                Claim::Ready(p, waited) => {
+                    if let Some(elapsed) = waited.filter(|d| d.as_millis() >= 5) {
+                        eprintln!("[gfx] pipeline {:016x}/{fs_key:016x}: waited {} ms for prewarm", vs_key.0, elapsed.as_millis());
                     }
-                    Some(Slot::Building) if !wait => return Err("pipeline compiling"),
-                    Some(Slot::Building) if t0.elapsed() < PREWARM_WAIT => {
-                        drop(m);
-                        crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
-                    }
-                    Some(Slot::Building) => {
-                        m.insert(r, Slot::Claimed);
-                        break;
-                    }
-                    Some(Slot::Claimed) => break,
-                    None => {
-                        m.insert(r.clone(), Slot::Claimed);
-                        drop(m);
-                        record(r);
-                        break;
-                    }
+                    self.pipelines.insert(key, Some(p.clone()));
+                    return Ok(p);
                 }
+                Claim::Compiling => return Err("pipeline compiling"),
+                Claim::Build => {}
+                Claim::Record => record(r),
             }
+        }
+        if let Some(p) = super::pso4::get().and_then(|p4| p4.pipeline(vs, fs, t, cs, cm, &blend, false)) {
+            self.pipelines.insert(key, Some(p.clone()));
+            return Ok(p);
         }
         let (jvs, jfs, jt) = (vs.clone(), fs.clone(), t.clone());
         let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
@@ -422,6 +452,9 @@ fn build_pipeline(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, c
 }
 
 fn build_pipeline_inner(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, channel_mask: u32, blend: &[u64; 8], name: &str) -> Option<Shared<Pipeline>> {
+    if let Some(p) = super::pso4::get().and_then(|p4| p4.pipeline(vs, fs, t, color_state, channel_mask, blend, true)) {
+        return Some(p);
+    }
     let d = descriptor(&vs.func.0, &fs.func.0, t, color_state, channel_mask, blend);
     let dev = &gfx::gpu().device.0;
     if let Some(a) = &*ARCHIVES {
@@ -624,22 +657,60 @@ fn read_list() -> Vec<Recorded> {
         .collect()
 }
 
+#[derive(Default)]
+struct Warm {
+    started: bool,
+    finished: bool,
+    done: usize,
+    total: usize,
+}
+
+static WARM: Mutex<Warm> = Mutex::new(Warm { started: false, finished: false, done: 0, total: 0 });
+static WARM_CHANGED: Condvar = Condvar::new();
+
+fn warm_step(finished: bool) {
+    let mut w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+    if finished {
+        w.finished = true;
+    } else {
+        w.done += 1;
+    }
+    WARM_CHANGED.notify_all();
+}
+
 pub fn prewarm() {
+    {
+        let mut w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+        if w.started {
+            return;
+        }
+        w.started = true;
+    }
     std::thread::Builder::new()
         .name("prewarm".into())
         .spawn(|| {
             use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
             let t0 = std::time::Instant::now();
             let list = read_list();
+            WARM.lock().unwrap_or_else(PoisonError::into_inner).total = list.len();
+            let tc = std::time::Instant::now();
+            let kernels = super::shaders::warm_compute();
+            if kernels > 0 {
+                eprintln!("[gfx] prewarmed {kernels} compute shaders in {:.1} s", tc.elapsed().as_secs_f32());
+            }
             let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let workers = std::env::var("NX_PREWARM_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get())).max(1);
             std::thread::scope(|s| {
-                for _ in 0..2 {
+                for _ in 0..workers {
                     s.spawn(|| {
-                        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+                        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+                        super::pso4::set_prewarming(true);
                         while let Some(r) = list.get(next.fetch_add(1, Relaxed)) {
                             {
-                                let mut m = PREWARMED.lock().unwrap();
+                                let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
                                 if m.contains_key(r) {
+                                    drop(m);
+                                    warm_step(false);
                                     continue;
                                 }
                                 m.insert(r.clone(), Slot::Building);
@@ -647,25 +718,54 @@ pub fn prewarm() {
                             let _building = Building(r);
                             objc2::rc::autoreleasepool(|_| {
                                 let (Some(vs), Some(fs)) = (super::shaders::aot_compiled(r.vs), super::shaders::aot_compiled(r.fs)) else { return };
-                                let d = descriptor(&vs.func.0, &fs.func.0, &r.targets(), r.color_state, r.channel_mask, &r.blend);
-                                if let Some(a) = &*ARCHIVES {
-                                    d.setBinaryArchives(Some(&a.0));
-                                }
-                                if let Ok(p) = gfx::gpu().device.0.newRenderPipelineStateWithDescriptor_error(&d) {
-                                    let mut m = PREWARMED.lock().unwrap();
+                                let name = format!("prewarm {:016x}/{:016x}", r.vs.0, r.fs.0);
+                                if let Some(p) = build_pipeline(&vs, &fs, &r.targets(), r.color_state, r.channel_mask, &r.blend, &name) {
+                                    let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
                                     if matches!(m.get(r), Some(Slot::Building)) {
-                                        m.insert(r.clone(), Slot::Ready(Shared(p)));
+                                        m.insert(r.clone(), Slot::Ready(p));
+                                        PREWARM_CHANGED.notify_all();
                                     }
                                     built.fetch_add(1, Relaxed);
                                 }
                             });
+                            warm_step(false);
                         }
                     });
                 }
             });
-            eprintln!("[gfx] prewarmed {}/{} recorded pipelines in {:.1} s", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
+            eprintln!("[gfx] prewarmed {}/{} recorded pipelines in {:.1} s on {workers} workers", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
+            if let Some(p4) = super::pso4::get() {
+                objc2::rc::autoreleasepool(|_| p4.prewarm_done());
+            }
+            warm_step(true);
         })
         .unwrap();
+}
+
+pub fn wait_prewarm() {
+    if std::env::var_os("NX_PREWARM_WAIT").is_some_and(|v| v == "0") {
+        return;
+    }
+    let t0 = std::time::Instant::now();
+    let mut shown = false;
+    crate::kernel::blocking(|| {
+        let mut w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+        while w.started && !w.finished {
+            w = WARM_CHANGED.wait_timeout(w, std::time::Duration::from_millis(50)).unwrap_or_else(PoisonError::into_inner).0;
+            let elapsed = t0.elapsed().as_secs_f32();
+            let frac = if w.total == 0 { 0.0 } else { w.done as f32 / w.total as f32 };
+            let left = if frac > 0.0 { elapsed / frac - elapsed } else { f32::MAX };
+            if !w.finished && elapsed >= 0.5 && (shown || left >= 0.3) {
+                drop(w);
+                shown = true;
+                objc2::rc::autoreleasepool(|_| gfx::show_progress(frac));
+                w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+    });
+    if shown || t0.elapsed().as_millis() >= 50 {
+        eprintln!("[gfx] first frame waited {:.1} s for the pipeline prewarm", t0.elapsed().as_secs_f32());
+    }
 }
 
 fn record(r: Recorded) {
@@ -686,22 +786,47 @@ fn add(archive: &Shared<Archive>, d: &MTLRenderPipelineDescriptor) -> bool {
     archive.0.addRenderPipelineFunctionsWithDescriptor_error(d).is_ok()
 }
 
-pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>) -> anyhow::Result<()> {
+type Variant = (u64, [u32; 3]);
+
+pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>, known_pairs: &[(Variant, Variant)]) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
     let t0 = std::time::Instant::now();
     let list = read_list();
-    if list.is_empty() {
-        eprintln!("[gfx] no recorded pipelines ({PIPELINE_LIST})");
-        return Ok(());
-    }
-    let archive = gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new()).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
-    let archive = Shared(archive);
     let function = |(key, [extra, uints, sints]): (u64, [u32; 3])| {
         let blob = programs.get(&key)?;
         super::shaders::compile(blob, false, extra, uints, sints, key)
     };
-    let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    if let Some(pre) = super::pso4::Prebuild::new() {
+        let mut pairs: Vec<(Variant, Variant)> = list.iter().map(|r| (r.vs, r.fs)).collect();
+        if std::env::var_os("NX_PREBUILD_PAIRS").is_none_or(|v| v != "0") {
+            pairs.extend_from_slice(known_pairs);
+        }
+        pairs.sort();
+        pairs.dedup();
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| loop {
+                    let Some(&(v, f)) = pairs.get(next.fetch_add(1, Relaxed)) else { return };
+                    objc2::rc::autoreleasepool(|_| {
+                        if let (Some(vs), Some(fs)) = (function(v), function(f)) {
+                            pre.add(&vs, &fs);
+                        }
+                    });
+                });
+            }
+        });
+        let (built, failed) = (pre.built.load(Relaxed), pre.failed.load(Relaxed));
+        objc2::rc::autoreleasepool(|_| pre.finish());
+        eprintln!("[gfx] prebuilt {built}/{} pipeline bases ({failed} failed) in {:.0} s", pairs.len(), t0.elapsed().as_secs_f32());
+    }
+    if std::env::var_os("NX_PIPELINE_ARCHIVE").is_none() || list.is_empty() {
+        return Ok(());
+    }
+    let archive = gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new()).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
+    let archive = Shared(archive);
+    let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| loop {
@@ -720,6 +845,10 @@ pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>)
     archive.0.serializeToURL_error(&NSURL::fileURLWithPath(&NSString::from_str(&path))).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
     eprintln!("[gfx] precompiled {}/{} recorded pipelines in {:.0} s", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
     Ok(())
+}
+
+pub fn recorded_pairs() -> Vec<(Variant, Variant)> {
+    read_list().iter().map(|r| (r.vs, r.fs)).collect()
 }
 
 pub fn recorded_variants() -> Vec<(u64, [u32; 3])> {
@@ -763,4 +892,49 @@ fn descriptor(vs: &Function, fs: &Function, t: &Targets, color_state: u32, chann
         }
     }
     d
+}
+
+#[cfg(test)]
+mod prewarm_tests {
+    use super::*;
+
+    fn key(n: u64) -> Recorded {
+        Recorded::parse(&format!("{n:x}:0:0:0\tfffffffffffffffe:0:0:0\t\t0\t0\t0\t0\t0,0,0,0,0,0,0,0")).unwrap()
+    }
+
+    #[test]
+    fn failed_build_releases_waiter() {
+        let r = key(0xffff_ffff_ffff_fff0);
+        PREWARMED.lock().unwrap().insert(r.clone(), Slot::Building);
+        let builder = r.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            drop(Building(&builder));
+        });
+        let t0 = std::time::Instant::now();
+        assert!(matches!(claim(&r, true, |f| f()), Claim::Record));
+        assert!(t0.elapsed() < PREWARM_WAIT);
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Claimed)));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn slow_build_falls_back_to_render_thread() {
+        let r = key(0xffff_ffff_ffff_fff1);
+        PREWARMED.lock().unwrap().insert(r.clone(), Slot::Building);
+        let t0 = std::time::Instant::now();
+        assert!(matches!(claim(&r, true, |f| f()), Claim::Build));
+        assert!(t0.elapsed() >= PREWARM_WAIT);
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Claimed)));
+        drop(Building(&r));
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Claimed)));
+    }
+
+    #[test]
+    fn building_without_wait_reports_compiling() {
+        let r = key(0xffff_ffff_ffff_fff2);
+        PREWARMED.lock().unwrap().insert(r.clone(), Slot::Building);
+        assert!(matches!(claim(&r, false, |f| f()), Claim::Compiling));
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Building)));
+    }
 }

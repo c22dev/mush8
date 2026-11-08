@@ -223,8 +223,11 @@ impl Replay<'_> {
             super::shaders::Lookup::Pending => return Err("compute shader compiling"),
             super::shaders::Lookup::Failed => return Err("compute shader failed"),
         };
-        let pipeline = match self.e.kernels.get(&s.hash) {
-            Some(p) => p.clone(),
+        let pipeline = match self.e.kernels.get(&s.hash).cloned().or_else(|| super::shaders::warm_kernel(s.hash)) {
+            Some(p) => {
+                self.e.kernels.entry(s.hash).or_insert_with(|| p.clone());
+                p
+            }
             None => {
                 let p = gfx::gpu().device.0.newComputePipelineStateWithFunction_error(&c.func.0).map_err(|_| "compute pipeline failed")?;
                 let p = gfx::Shared(p);

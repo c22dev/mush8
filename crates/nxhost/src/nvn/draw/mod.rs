@@ -2,6 +2,7 @@
 // Constantin Clerc (c22dev) - 0.1
 mod copy;
 mod exec;
+mod pso4;
 mod shaders;
 mod state;
 mod textures;
@@ -544,6 +545,8 @@ static DEBUG: LazyLock<Debug> = LazyLock::new(|| {
 
 pub fn submit(handles: &[u64]) {
     gfx::wait_foreground();
+    static FIRST: std::sync::Once = std::sync::Once::new();
+    FIRST.call_once(state::wait_prewarm);
     objc2::rc::autoreleasepool(|_| {
         let mut e = ENGINE.lock().unwrap();
         e.arena.recycle();
@@ -553,11 +556,13 @@ pub fn submit(handles: &[u64]) {
         let Some(cb) = gfx::gpu().queue.0.commandBuffer() else { return };
         let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, copies: HashMap::new() };
         let mut updated = BTreeMap::new();
+        let mut programs = std::collections::BTreeSet::new();
         for h in handles {
             if let Some(cmds) = cmd::recording(*h) {
-                collect_updates(&cmds, 0, &mut updated);
+                collect_updates(&cmds, 0, &mut updated, &mut programs);
             }
         }
+        r.e.shaders.prefetch(&programs);
         for (&addr, &size) in &updated {
             let size = size.min(0x10000) as usize;
             let src = unsafe { std::slice::from_raw_parts(addr as *const u8, size) };
@@ -837,17 +842,18 @@ fn dump_at(t: &Shared<gfx::Texture>) {
     }
 }
 
-fn collect_updates(cmds: &[Cmd], depth: usize, out: &mut BTreeMap<u64, u64>) {
+fn collect_updates(cmds: &[Cmd], depth: usize, out: &mut BTreeMap<u64, u64>, programs: &mut std::collections::BTreeSet<(u64, u64)>) {
     for c in cmds {
         match c {
             Cmd::UpdateUniform { addr, size, offset, data } => {
                 let s = out.entry(*addr).or_default();
                 *s = (*s).max(*size).max(offset + data.len() as u64);
             }
+            Cmd::Program(p) => programs.extend(p.iter().copied()),
             Cmd::Call(handles) if depth < 8 => {
                 for h in handles {
                     if let Some(sub) = cmd::recording(*h) {
-                        collect_updates(&sub, depth + 1, out);
+                        collect_updates(&sub, depth + 1, out, programs);
                     }
                 }
             }

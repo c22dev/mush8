@@ -601,6 +601,64 @@ pub fn present(tex: Option<&Texture>, flip: bool) {
     cb.commit();
 }
 
+pub fn show_progress(done: f32) {
+    #[cfg(target_os = "ios")]
+    if !ios::ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let Some(layer) = LAYER.get() else { return };
+    let g = gpu();
+    static BAR: OnceLock<Shared<Texture>> = OnceLock::new();
+    let bar = BAR.get_or_init(|| {
+        let d = unsafe { MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(MTLPixelFormat::RGBA8Unorm, 2, 1, false) };
+        let t = g.device.0.newTextureWithDescriptor(&d).expect("progress texture");
+        let px: [u8; 8] = [56, 56, 60, 255, 230, 230, 235, 255];
+        unsafe {
+            t.replaceRegion_mipmapLevel_withBytes_bytesPerRow(
+                MTLRegion { origin: MTLOrigin { x: 0, y: 0, z: 0 }, size: MTLSize { width: 2, height: 1, depth: 1 } },
+                0,
+                std::ptr::NonNull::from(&px).cast(),
+                8,
+            )
+        };
+        Shared(t)
+    });
+    let size = layer.0.drawableSize();
+    let Some(drawable) = layer.0.nextDrawable() else { return };
+    let Some(cb) = g.queue.0.commandBuffer() else { return };
+    let desc = MTLRenderPassDescriptor::new();
+    let att = unsafe { desc.colorAttachments().objectAtIndexedSubscript(0) };
+    att.setTexture(Some(&drawable.texture()));
+    att.setLoadAction(MTLLoadAction::Clear);
+    att.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0 });
+    att.setStoreAction(MTLStoreAction::Store);
+    if let Some(enc) = cb.renderCommandEncoderWithDescriptor(&desc) {
+        enc.setRenderPipelineState(&g.present.0);
+        let (w, h) = (size.width.max(1.0), size.height.max(1.0));
+        let (bw, bh) = ((w * 0.36).round(), (h * 0.008).max(4.0).round());
+        let (x, y) = (((w - bw) / 2.0).floor(), (h * 0.62).floor());
+        let fill = (bw * done.clamp(0.0, 1.0) as f64).round();
+        for (u, vw) in [(0.25f32, bw), (0.75, fill)] {
+            if vw < 1.0 {
+                continue;
+            }
+            let p = PresentParams { flip: 0, _pad: 0, offset: [0.0; 2], scale: [1.0; 2], lo: [u, 0.5], hi: [u, 0.5] };
+            enc.setViewport(MTLViewport { originX: x, originY: y, width: vw, height: bh, znear: 0.0, zfar: 1.0 });
+            unsafe {
+                let p = std::ptr::NonNull::from(&p).cast();
+                enc.setVertexBytes_length_atIndex(p, size_of::<PresentParams>(), 0);
+                enc.setFragmentBytes_length_atIndex(p, size_of::<PresentParams>(), 0);
+                enc.setFragmentTexture_atIndex(Some(&bar.0), 0);
+                enc.setFragmentSamplerState_atIndex(Some(&g.sampler.0), 0);
+                enc.drawPrimitives_vertexStart_vertexCount(MTLPrimitiveType::Triangle, 0, 3);
+            }
+        }
+        enc.endEncoding();
+    }
+    cb.presentDrawable(ProtocolObject::from_ref(&*drawable));
+    cb.commit();
+}
+
 const TV_MAX: (f64, f64) = (1920.0, 1080.0);
 
 static ASPECT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
