@@ -416,10 +416,10 @@ struct LauncherView: View {
     @State private var shownRefusal: String?
     @State private var tick = 0
     @State private var copied: String?
-    @State private var showMods = false
     @State private var mods: [Mod] = []
     @State private var miiCount = 0
     @State private var miiError: String?
+    @State private var pageOpen = false
 
     var body: some View {
         let _ = tick
@@ -431,13 +431,41 @@ struct LauncherView: View {
                 Text("Mush8").font(.title2.weight(.semibold))
                 Spacer()
             }
-            Form {
-                if !ready { dataSection(list) }
-                settingsSection(list)
-                systemSection
-                if ready { dataSection(list) }
+            NavigationStack {
+                Form {
+                    if !ready { dataSection(list) }
+                    Section {
+                        NavigationLink { multiplayerPage } label: {
+                            CategoryLabel(title: "Multiplayer", icon: "person.2.fill", color: .green, value: modeName)
+                        }
+                        if let mods = list.first(where: { $0.id == "Mods" }) {
+                            NavigationLink { ModsView(s: s, onInstalled: { tick += 1 }) } label: {
+                                CategoryLabel(title: "Mods", icon: "puzzlepiece.extension.fill", color: .orange, value: mods.detail)
+                            }
+                            .disabled(s.folder.isEmpty || prep.running)
+                        }
+                        NavigationLink { playerPage } label: {
+                            CategoryLabel(title: "Player", icon: "person.crop.circle.fill", color: .purple, value: playerName)
+                        }
+                    }
+                    Section {
+                        NavigationLink { graphicsPage } label: {
+                            CategoryLabel(title: "Graphics", icon: "display", color: .blue, value: s.handheld ? "Handheld" : s.uhd ? "4K" : "1080p")
+                        }
+                        NavigationLink { controlsPage } label: {
+                            CategoryLabel(title: "Audio & Controls", icon: "gamecontroller.fill", color: .pink, value: nil)
+                        }
+                    }
+                    Section {
+                        NavigationLink { devicePage(list) } label: {
+                            CategoryLabel(title: "Device", icon: "desktopcomputer", color: sys.available < 4 << 30 ? .orange : .gray, value: bytes(sys.available))
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+                .onAppear { pageOpen = false }
+                .onDisappear { pageOpen = true }
             }
-            .formStyle(.grouped)
             if let e = prep.error ?? launchError { Text(e).foregroundStyle(.red).font(.callout) }
             if prep.running {
                 ProgressView().controlSize(.small)
@@ -448,11 +476,11 @@ struct LauncherView: View {
                         .overlay { if launching { ProgressView().controlSize(.small).tint(.white) } }
                         .frame(maxWidth: .infinity)
                 }
-                    .controlSize(.large).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .controlSize(.large).buttonStyle(.borderedProminent).keyboardShortcut(pageOpen ? nil : .defaultAction)
             } else {
                 Button(action: prepare) { Text("Prepare game data").frame(maxWidth: .infinity) }
                     .controlSize(.large).buttonStyle(.borderedProminent)
-                    .disabled(s.folder.isEmpty || !list.filter { ["Console Keys", "Base Game", "Update", "Firmware"].contains($0.id) }.allSatisfy(\.ok))
+                    .disabled(pageOpen || s.folder.isEmpty || !list.filter { ["Console Keys", "Base Game", "Update", "Firmware"].contains($0.id) }.allSatisfy(\.ok))
                 Text("Compiles the game's shaders AOT (may take a few mins)")
                     .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             }
@@ -460,9 +488,6 @@ struct LauncherView: View {
         }
         .padding(20)
         .frame(width: 520, height: 770)
-        .sheet(isPresented: $showMods, onDismiss: { tick += 1 }) {
-            ModsView(s: s, onInstalled: { tick += 1 })
-        }
         .onAppear { reload() }
         .onChange(of: tick) { reload() }
         .onChange(of: s.folder) { reload() }
@@ -501,147 +526,171 @@ struct LauncherView: View {
         case "lan": return "Switch and Mush8 players on the same network can join"
         case "lanplay": return "Lan-Play.com clients on the same server can join"
         case "wireless": return "Nearby Mush8 clients can join (keep Wi-Fi on)"
-        case "nextendo": return "Mario Kart 8 Deluxe online on Nextendo Network servers, with Switch players. Needs a Nextendo account and update 4.0.1"
+        case "nextendo": return "Online with Switch players. Needs a Nextendo account and update 4.0.1"
         default: return nil
         }
     }
 
-    @ViewBuilder func settingsSection(_ list: [Check]) -> some View {
-        Section {
-            Picker("Mode", selection: $s.network) {
-                Text("Off").tag("off")
-                Text("LAN").tag("lan")
-                Text("Online").tag("lanplay")
-                Text("Wireless (nearby)").tag("wireless")
-                Text("Nextendo").tag("nextendo")
-            }
-            switch s.network {
-            case "lan":
-                Picker("Network", selection: $s.lanInterface) {
-                    Text("Automatic").tag("")
-                    ForEach(sys.nets, id: \.self) { n in Text("\(n.name) · \(n.ip)").tag(n.name) }
-                }
-            case "lanplay":
-                TextField("Server", text: $s.lanPlayServer, prompt: Text("host:port"))
-            case "nextendo":
-                NextendoSignIn(pid: $s.nextendoPid, name: $s.nextendoName)
-            default:
-                EmptyView()
-            }
-        } header: {
-            Text("Multiplayer")
-        } footer: {
-            if let note = multiplayerNote { Text(note).font(.caption).foregroundStyle(.secondary) }
+    var modeName: String {
+        switch s.network {
+        case "lan": return "LAN"
+        case "lanplay": return "Online"
+        case "wireless": return "Wireless"
+        case "nextendo": return "Nextendo"
+        default: return "Off"
         }
-        Section {
-            Toggle("Remote controllers", isOn: $s.phonePads)
-            if s.phonePads {
-                Toggle("Web controllers", isOn: $s.browserPads)
-                if s.browserPads {
-                    addressRow("Mac's address", phonePadHost)
-                    addressRow("Or by IP", sys.lan.map { "http://\($0):2904" })
+    }
+
+    var multiplayerPage: some View {
+        CategoryPage(title: "Multiplayer") {
+            Section {
+                Picker("Mode", selection: $s.network) {
+                    Text("Off").tag("off")
+                    Text("LAN").tag("lan")
+                    Text("Online").tag("lanplay")
+                    Text("Wireless (nearby)").tag("wireless")
+                    Text("Nextendo").tag("nextendo")
                 }
+                switch s.network {
+                case "lan":
+                    Picker("Network", selection: $s.lanInterface) {
+                        Text("Automatic").tag("")
+                        ForEach(sys.nets, id: \.self) { n in Text("\(n.name) · \(n.ip)").tag(n.name) }
+                    }
+                case "lanplay":
+                    TextField("Server", text: $s.lanPlayServer, prompt: Text("host:port"))
+                case "nextendo":
+                    NextendoSignIn(pid: $s.nextendoPid, name: $s.nextendoName)
+                default:
+                    EmptyView()
+                }
+            } footer: {
+                if let note = multiplayerNote { Text(note).font(.caption).foregroundStyle(.secondary) }
             }
-        } footer: {
-            Text(s.phonePads && s.browserPads
-                ? "After you press Play, other phones on the same Wi-Fi can open one of these addresses in their browser and join as players. The name stays the same, the IP can change"
-                : "Nearby iPhones can join as players with \"Use as a controller\"")
-                .font(.caption).foregroundStyle(.secondary)
+            Section {
+                Toggle("Remote controllers", isOn: $s.phonePads)
+                if s.phonePads {
+                    Toggle("Web controllers", isOn: $s.browserPads)
+                    if s.browserPads {
+                        addressRow("Mac's address", phonePadHost)
+                        addressRow("Or by IP", sys.lan.map { "http://\($0):2904" })
+                    }
+                }
+            } footer: {
+                Text(s.phonePads && s.browserPads
+                    ? "Phones on the same Wi-Fi open one of these in a browser after Play"
+                    : "Nearby iPhones join with \"Use as a controller\"")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
         }
-        if let mods = list.first(where: { $0.id == "Mods" }) {
-            Section("Mods") {
+    }
+
+    func devicePage(_ list: [Check]) -> some View {
+        CategoryPage(title: "Device") {
+            systemSection
+            dataSection(list)
+        }
+    }
+
+    var playerName: String? {
+        let name = playerNickname(nextendo: s.network == "nextendo", source: s.nicknameSource, custom: s.nickname, nextendoName: s.nextendoName)
+        return name.isEmpty ? nil : name
+    }
+
+    var playerPage: some View {
+        CategoryPage(title: "Player") {
+            Section {
+                PlayerIdentity(nextendo: s.network == "nextendo", nextendoName: s.nextendoName,
+                               nameSource: $s.nicknameSource, name: $s.nickname, country: $s.country)
                 HStack {
-                    Text(mods.detail).foregroundStyle(.secondary)
+                    Text(miiCount == 0 ? "No custom Miis" : "\(miiCount) custom Mii\(miiCount == 1 ? "" : "s")").foregroundStyle(.secondary)
                     Spacer()
-                    Button("Customize…") { showMods = true }
-                        .disabled(s.folder.isEmpty || prep.running)
+                    if miiCount > 0 {
+                        Button("Remove") {
+                            miiError = nil
+                            do { try removeMiis(in: s.folderURL) } catch { miiError = error.localizedDescription }
+                            tick += 1
+                        }
+                    }
+                    Button("Import…", action: chooseMiis)
                 }
+                .disabled(s.folder.isEmpty || prep.running)
+                if let miiError { Text(miiError).foregroundStyle(.red).font(.callout) }
+            } footer: {
+                Text("Shown on your ghosts and online, 10 characters max. The country sets your Nextendo flag. Miis: a MiiDatabase.dat, .charinfo or .storedata")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
-        Section {
-            PlayerIdentity(nextendo: s.network == "nextendo", nextendoName: s.nextendoName,
-                           nameSource: $s.nicknameSource, name: $s.nickname, country: $s.country)
-            HStack {
-                Text(miiCount == 0 ? "No custom Miis" : "\(miiCount) custom Mii\(miiCount == 1 ? "" : "s")").foregroundStyle(.secondary)
-                Spacer()
-                if miiCount > 0 {
-                    Button("Remove") {
-                        miiError = nil
-                        do { try removeMiis(in: s.folderURL) } catch { miiError = error.localizedDescription }
-                        tick += 1
+    }
+
+    var graphicsPage: some View {
+        CategoryPage(title: "Graphics") {
+            Section {
+                Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1 })) {
+                    Text("Docked (1080p)").tag(0)
+                    Text("Docked (4K)").tag(1)
+                    Text("Handheld (720p)").tag(2)
+                }
+                Toggle(isOn: $s.split60) { labeled("60 fps split screen", "For 3 or 4 players, needs a fast GPU") }
+                Picker("Screen", selection: $s.fillScreen) {
+                    Text("16:9").tag(false)
+                    Text("Fill screen").tag(true)
+                }
+                if s.fillScreen {
+                    Picker("HUD", selection: $s.hudAtEdges) {
+                        Text("Screen edges").tag(true)
+                        Text("Centered").tag(false)
                     }
                 }
-                Button("Import…", action: chooseMiis)
-            }
-            .disabled(s.folder.isEmpty || prep.running)
-            if let miiError { Text(miiError).foregroundStyle(.red).font(.callout) }
-        } header: {
-            Text("Player")
-        } footer: {
-            Text("The name is shown on your time trial ghosts and online, 10 characters max. The country sets your flag online with Nextendo. Miis: a MiiDatabase.dat from your Switch, or .charinfo / .storedata Mii files. They show up next to the default Miis in the game")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        Section {
-            Picker("Console mode", selection: Binding(get: { s.handheld ? 2 : s.uhd ? 1 : 0 }, set: { s.handheld = $0 == 2; s.uhd = $0 == 1 })) {
-                Text("Docked (1080p)").tag(0)
-                Text("Docked (4K)").tag(1)
-                Text("Handheld (720p)").tag(2)
-            }
-            Toggle(isOn: $s.split60) { labeled("60 fps split screen", "3 or 4 players get every screen drawn each frame, needs a fast GPU") }
-            Picker("Screen", selection: $s.fillScreen) {
-                Text("16:9").tag(false)
-                Text("Fill screen").tag(true)
-            }
-            if s.fillScreen {
-                Picker("HUD", selection: $s.hudAtEdges) {
-                    Text("Screen edges").tag(true)
-                    Text("Centered").tag(false)
+                HStack {
+                    Text("HUD size")
+                    Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
+                    Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
                 }
+            } footer: {
+                Text("Handheld is lighter on the GPU and battery").font(.caption).foregroundStyle(.secondary)
             }
-            HStack {
-                Text("HUD size")
-                Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
-                Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
+            Section {
+                Toggle("Pipeline archive", isOn: $s.pipelineArchive)
+                Toggle("Prewarm pipelines", isOn: $s.prewarm)
+                Toggle("Background shader compiling", isOn: $s.backgroundCompile)
+            } footer: {
+                Text("Builds graphics pipelines at startup").font(.caption).foregroundStyle(.secondary)
             }
-        } header: {
-            Text("Graphics")
-        } footer: {
-            Text("Handheld renders at 720p: lighter on the GPU and battery. Fill screen widens the race to the whole display")
-                .font(.caption).foregroundStyle(.secondary)
         }
-        Section {
-            Toggle("Pipeline archive", isOn: $s.pipelineArchive)
-            Toggle("Prewarm pipelines", isOn: $s.prewarm)
-            Toggle("Background shader compiling", isOn: $s.backgroundCompile)
-        } footer: {
-            Text("Builds the game's graphics pipelines in the background at startup").font(.caption).foregroundStyle(.secondary)
-        }
-        Section {
-            Toggle("Spatial audio", isOn: $s.spatial)
-            Toggle("Vibration", isOn: $s.rumble)
-            if s.rumble {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text("Rumble cutoff")
-                        Slider(value: $s.rumbleMin, in: 0...0.9, step: 0.05)
-                        Text("\(Int((s.rumbleMin * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
+    }
+
+    var controlsPage: some View {
+        CategoryPage(title: "Audio & Controls") {
+            Section {
+                Toggle("Spatial audio", isOn: $s.spatial)
+            }
+            Section {
+                Toggle("Vibration", isOn: $s.rumble)
+                if s.rumble {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text("Rumble cutoff")
+                            Slider(value: $s.rumbleMin, in: 0...0.9, step: 0.05)
+                            Text("\(Int((s.rumbleMin * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
+                        }
+                        Text("Weaker rumble is ignored, which stops the buzz on Xbox and PlayStation controllers. Switch controllers aren't affected")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("Controller rumble weaker than this stays off, which stops the constant buzz on Xbox and PlayStation controllers. Switch controllers are not affected")
-                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Toggle("Motion controls", isOn: $s.motion)
-            Toggle(isOn: $s.touchscreen) {
-                labeled("Touchscreen", "Clicking on the game window taps the Switch touchscreen")
+            Section {
+                Toggle("Motion controls", isOn: $s.motion)
+                Toggle(isOn: $s.touchscreen) {
+                    labeled("Touchscreen", "Clicking the game window taps the touchscreen")
+                }
+                Picker(selection: $s.padDriver) {
+                    Text("Apple").tag("apple")
+                    Text("SDL").tag("sdl")
+                } label: {
+                    labeled("Gamepad driver", "SDL supports more controllers, Apple follows System Settings remapping")
+                }
             }
-            Picker(selection: $s.padDriver) {
-                Text("Apple").tag("apple")
-                Text("SDL").tag("sdl")
-            } label: {
-                labeled("Gamepad driver", "SDL supports more controllers, and rumble on more of them. Apple follows the button remapping in System Settings")
-            }
-        } header: {
-            Text("Audio & controls")
         }
     }
 
@@ -776,7 +825,6 @@ struct LauncherView: View {
 struct ModsView: View {
     @ObservedObject var s: Settings
     let onInstalled: () -> Void
-    @Environment(\.dismiss) private var dismiss
     @State private var mods: [Mod] = []
     @State private var skipped: [String: String] = [:]
     @State private var browsing = false
@@ -785,34 +833,27 @@ struct ModsView: View {
     @State private var actionError: String?
 
     var body: some View {
-        VStack(spacing: 12) {
-            Form {
-                Section {
-                    if mods.isEmpty {
-                        Text("No mods installed. Browse GameBanana to add one.").foregroundStyle(.secondary)
-                    }
-                    ForEach(mods) { m in
-                        ModRow(mod: m, disabled: $s.disabledMods, warning: patchWarning(m, skipped: skipped), inspect: { inspectedMod = m }, delete: { deletingMod = m })
-                    }
-                } header: {
-                    ModsHeader(mods: mods, disabled: s.disabledMods)
-                } footer: {
-                    Text("Mods apply from top to bottom, so a lower mod wins when two mods change the same file. Code patches apply the next time you Prepare.")
-                        .font(.caption).foregroundStyle(.secondary)
+        CategoryPage(title: "Mods") {
+            Section {
+                if mods.isEmpty {
+                    Text("No mods installed. Browse GameBanana to add one.").foregroundStyle(.secondary)
                 }
+                ForEach(mods) { m in
+                    ModRow(mod: m, disabled: $s.disabledMods, warning: patchWarning(m, skipped: skipped), inspect: { inspectedMod = m }, delete: { deletingMod = m })
+                }
+            } header: {
+                ModsHeader(mods: mods, disabled: s.disabledMods)
+            } footer: {
+                Text("Lower mods win conflicts. Code patches apply on the next Prepare")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            .formStyle(.grouped)
-            HStack {
-                Button("Show in Finder") { NSWorkspace.shared.open(s.folderURL.appendingPathComponent("mods")) }
-                    .disabled(mods.isEmpty)
-                Button("Browse GameBanana…") { browsing = true }
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
-            }
+        } accessory: {
+            Button("Show in Finder") { NSWorkspace.shared.open(s.folderURL.appendingPathComponent("mods")) }
+                .disabled(mods.isEmpty)
+            Button("Browse GameBanana…") { browsing = true }
         }
-        .padding(20)
-        .frame(width: 540, height: 420)
         .onAppear(perform: reload)
+        .onDisappear(perform: onInstalled)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in reload() }
         .modActions(folder: s.folderURL, inspected: $inspectedMod, deleting: $deletingMod, error: $actionError, delete: deleteMod)
         .sheet(isPresented: $browsing) {
@@ -839,6 +880,63 @@ struct ModsView: View {
             mods = installedMods(in: s.folderURL)
             onInstalled()
         } catch { actionError = error.localizedDescription }
+    }
+}
+
+struct CategoryLabel: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let value: String?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(color.gradient, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            Text(title)
+            Spacer()
+            if let value { Text(value).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+struct CategoryPage<Content: View, Accessory: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+    @ViewBuilder let accessory: Accessory
+    @Environment(\.dismiss) private var dismiss
+
+    init(title: String, @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory = { EmptyView() }) {
+        self.title = title
+        self.content = content()
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Text(title).font(.headline)
+                HStack {
+                    Button { dismiss() } label: {
+                        Label("Back", systemImage: "chevron.left")
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    Spacer()
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+            Form { content }.formStyle(.grouped)
+            if Accessory.self != EmptyView.self {
+                HStack { accessory; Spacer() }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 8)
+            }
+        }
+        .navigationBarBackButtonHidden()
     }
 }
 
