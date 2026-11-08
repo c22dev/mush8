@@ -16,8 +16,7 @@ const MAX_DEPTH: usize = 64;
 const ACCESS_LIFE: Duration = Duration::from_secs(50 * 60);
 const RENEW_RETRY: Duration = Duration::from_secs(5 * 60);
 const HISTORY_TICK: Duration = Duration::from_secs(15);
-const HISTORY_EVERY: Duration = Duration::from_secs(300);
-const HISTORY_FIRST: Duration = Duration::from_secs(60);
+const HISTORY_EVERY: Duration = Duration::from_secs(60);
 const MK8_NAME: &str = "Mario Kart 8 Deluxe";
 
 fn signed_in_access() -> String {
@@ -601,17 +600,15 @@ fn history_loop() {
     let mut played = Duration::ZERO;
     let mut tick = Instant::now();
     let mut pushed = Instant::now();
-    let mut wait = HISTORY_FIRST.min(HISTORY_EVERY);
     let mut logged: Option<bool> = None;
     loop {
         std::thread::sleep(HISTORY_TICK);
         played += tick.elapsed().min(HISTORY_TICK * 2);
         tick = Instant::now();
-        if pushed.elapsed() < wait {
+        if pushed.elapsed() < HISTORY_EVERY {
             continue;
         }
         pushed = Instant::now();
-        wait = HISTORY_EVERY;
         let body = history_body(base + played.as_secs(), &iso_utc(crate::services::nextrace::now()));
         let reply = send(&nextendo::token(), "PUT", "/api/history", Some(&body));
         if matches!(reply, Ok((401 | 403, _))) {
