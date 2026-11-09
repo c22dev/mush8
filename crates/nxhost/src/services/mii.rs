@@ -112,6 +112,23 @@ fn parse(data: &[u8]) -> Vec<[u8; CHAR_INFO_SIZE]> {
     }
 }
 
+fn with_valid_id(mut c: [u8; CHAR_INFO_SIZE]) -> [u8; CHAR_INFO_SIZE] {
+    if c[6] & 0xF0 == 0x40 && c[8] & 0xC0 == 0x80 {
+        return c;
+    }
+    if c[..16].iter().all(|&b| b == 0) {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in &c[16..] {
+            h = (h ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+        c[..8].copy_from_slice(&h.to_le_bytes());
+        c[8..16].copy_from_slice(&h.rotate_left(32).to_le_bytes());
+    }
+    c[6] = (c[6] & 0x0F) | 0x40;
+    c[8] = (c[8] & 0x3F) | 0x80;
+    c
+}
+
 fn load(dir: &Path) -> Vec<[u8; CHAR_INFO_SIZE]> {
     let mut files: Vec<_> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.is_file()).collect();
     files.sort_by_key(|p| (!p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("MiiDatabase.dat")), p.clone()));
@@ -122,7 +139,7 @@ fn load(dir: &Path) -> Vec<[u8; CHAR_INFO_SIZE]> {
         if miis.is_empty() {
             eprintln!("[mii] {}: not a MiiDatabase.dat, CharInfo or StoreData file", p.display());
         }
-        for c in miis {
+        for c in miis.into_iter().map(with_valid_id) {
             let r = verify(&c);
             if r != 0 {
                 eprintln!("[mii] {}: Mii rejected by CharInfoRaw::Verify: code {r:#x}", p.display());
@@ -351,5 +368,20 @@ mod tests {
         assert_eq!(miis.iter().map(|c| c[0]).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(parse(&[0u8; CHAR_INFO_SIZE]).len(), 1);
         assert!(parse(&[0u8; 0x20]).is_empty());
+    }
+
+    #[test]
+    fn invalid_create_ids_are_repaired_deterministically() {
+        let mut c = defaults()[0];
+        c[..16].copy_from_slice(&[0x80, 0xdf, 0x19, 0x9a, 0x95, 0x0c, 0x7b, 0xb9, 0x36, 0x14, 0, 0, 0, 0, 0, 0]);
+        let fixed = with_valid_id(c);
+        assert_eq!((fixed[6], fixed[8]), (0x4b, 0xb6));
+        assert_eq!(fixed[16..], c[16..]);
+        assert_eq!(with_valid_id(defaults()[1]), defaults()[1]);
+        c[..16].fill(0);
+        let a = with_valid_id(c);
+        assert!(a[..16].iter().any(|&b| b != 0));
+        assert_eq!(a, with_valid_id(c));
+        assert_eq!((a[6] & 0xF0, a[8] & 0xC0), (0x40, 0x80));
     }
 }
