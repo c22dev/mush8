@@ -23,6 +23,7 @@ pub type BaseKey = (usize, u64, usize, u64);
 const FLUSH_AFTER: Duration = Duration::from_secs(10);
 const COMPACT_ABOVE: usize = 8;
 const PREBUILT_FLUSH: usize = 1000;
+const BASE_WAIT: Duration = Duration::from_secs(1);
 
 struct Period {
     compiler: Shared<Compiler>,
@@ -302,7 +303,24 @@ impl Pso4 {
             match m.get(&key) {
                 Some(Base::Ready(p)) => return p.clone(),
                 Some(Base::Building) if !compile => return None,
-                Some(Base::Building) => m = self.changed.wait(m).unwrap_or_else(PoisonError::into_inner),
+                Some(Base::Building) => {
+                    let deadline = Instant::now() + BASE_WAIT;
+                    let built = crate::kernel::blocking(|| {
+                        let mut m = m;
+                        while matches!(m.get(&key), Some(Base::Building)) {
+                            let left = deadline.saturating_duration_since(Instant::now());
+                            if left.is_zero() {
+                                return false;
+                            }
+                            m = self.changed.wait_timeout(m, left).unwrap_or_else(PoisonError::into_inner).0;
+                        }
+                        true
+                    });
+                    if !built {
+                        return None;
+                    }
+                    m = self.bases.lock().unwrap_or_else(PoisonError::into_inner);
+                }
                 None => break,
             }
         }
