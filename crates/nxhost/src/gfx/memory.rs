@@ -12,7 +12,20 @@ pub static TRIM: LazyLock<u64> = LazyLock::new(|| env_mb("NX_TRIM_MB", 400));
 pub static EMERGENCY: LazyLock<u64> = LazyLock::new(|| env_mb("NX_TRIM_EMERGENCY_MB", 250));
 pub const TIGHT: u64 = 600 * MB;
 
-static LIMIT: LazyLock<u64> = LazyLock::new(|| env_mb("NX_MEM_LIMIT_MB", if cfg!(target_os = "ios") { 3070 } else { 0 }));
+static LIMIT: LazyLock<u64> = LazyLock::new(|| env_mb("NX_MEM_LIMIT_MB", if cfg!(target_os = "ios") && physical() > 0 && physical() < 7 << 30 { 3070 } else { 0 }));
+
+pub fn wired() -> u64 {
+    let mut stats: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
+    let mut count = (std::mem::size_of::<libc::vm_statistics64>() / std::mem::size_of::<libc::integer_t>()) as libc::mach_msg_type_number_t;
+    unsafe extern "C" {
+        fn mach_host_self() -> libc::mach_port_t;
+    }
+    static HOST: LazyLock<libc::mach_port_t> = LazyLock::new(|| unsafe { mach_host_self() });
+    let r = unsafe { libc::host_statistics64(*HOST, libc::HOST_VM_INFO64, (&mut stats as *mut libc::vm_statistics64).cast(), &mut count) };
+    #[allow(deprecated)]
+    let page = unsafe { libc::vm_page_size } as u64;
+    if r == 0 { stats.wire_count as u64 * page } else { 0 }
+}
 
 pub fn footprint() -> u64 {
     unsafe extern "C" {
@@ -23,7 +36,7 @@ pub fn footprint() -> u64 {
 }
 
 #[cfg(target_os = "ios")]
-fn os_left() -> u64 {
+pub fn os_left() -> u64 {
     unsafe extern "C" {
         fn os_proc_available_memory() -> usize;
     }
@@ -34,7 +47,7 @@ fn os_left() -> u64 {
 }
 
 #[cfg(not(target_os = "ios"))]
-fn os_left() -> u64 {
+pub fn os_left() -> u64 {
     u64::MAX
 }
 

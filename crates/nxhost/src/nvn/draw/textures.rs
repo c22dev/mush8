@@ -320,8 +320,12 @@ impl Textures {
         if self.last_log.is_none_or(|t| now - t >= std::time::Duration::from_secs(10)) {
             self.last_log = Some(now);
             let bytes: usize = self.map.values().map(|e| MTLAllocation::allocatedSize(&*e.tex.0)).sum();
-            let left = if left == u64::MAX { "no limit".to_string() } else { format!("{} MB left", left >> 20) };
-            eprintln!("[mem] app uses {} MB, {left}, {} textures ({} MB)", memory::footprint() >> 20, self.map.len(), bytes >> 20);
+            let left = match (left, memory::os_left()) {
+                (u64::MAX, _) => "no limit".to_string(),
+                (l, u64::MAX) => format!("{} MB left", l >> 20),
+                (l, os) => format!("{} MB left (iOS allows {} MB more)", l >> 20, os >> 20),
+            };
+            eprintln!("[mem] app uses {} MB, {left}, phone wired {} MB, {} textures ({} MB)", memory::footprint() >> 20, memory::wired() >> 20, self.map.len(), bytes >> 20);
         }
     }
 
