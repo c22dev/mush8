@@ -152,17 +152,23 @@ fn archive_files(dir: &Path, prefix: &str) -> Vec<PathBuf> {
 }
 
 fn looks_like_archive(p: &Path) -> bool {
-    let Ok(b) = std::fs::read(p) else { return false };
+    use std::io::Read;
+    let Ok(f) = std::fs::File::open(p) else { return false };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return false };
+    let mut b = Vec::with_capacity(8 + 20 * 64);
+    if f.take(8 + 20 * 64).read_to_end(&mut b).is_err() {
+        return false;
+    }
     let be = |o: usize| b.get(o..o + 4).map(|w| u32::from_be_bytes(w.try_into().unwrap()));
     match be(0) {
         Some(0xCAFE_BABE | 0xCBFE_BABE) => {
             let Some(n) = be(4).filter(|&n| (1..=64).contains(&n)) else { return false };
             (0..n as usize).all(|i| {
                 let e = 8 + 20 * i;
-                matches!((be(e + 8), be(e + 12)), (Some(off), Some(size)) if size > 0 && off as u64 + size as u64 <= b.len() as u64)
+                matches!((be(e + 8), be(e + 12)), (Some(off), Some(size)) if size > 0 && off as u64 + size as u64 <= len)
             })
         }
-        Some(_) => b.len() > 32 && u32::from_le_bytes(b[..4].try_into().unwrap()) == 0xFEED_FACF,
+        Some(_) => len > 32 && u32::from_le_bytes(b[..4].try_into().unwrap()) == 0xFEED_FACF,
         None => false,
     }
 }
@@ -486,6 +492,50 @@ impl Prebuild {
 
     pub fn finish(self) {
         self.write(false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(name: &str, b: &[u8]) -> bool {
+        let p = std::env::temp_dir().join(format!("mush8-pso4-header-{}-{name}", std::process::id()));
+        std::fs::write(&p, b).unwrap();
+        let r = looks_like_archive(&p);
+        let _ = std::fs::remove_file(&p);
+        r
+    }
+
+    fn fat(n: u32, entries: &[(u32, u32)], len: usize) -> Vec<u8> {
+        let mut b = vec![0u8; len];
+        b[..4].copy_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+        b[4..8].copy_from_slice(&n.to_be_bytes());
+        for (i, &(off, size)) in entries.iter().enumerate() {
+            let e = 8 + 20 * i;
+            b[e + 8..e + 12].copy_from_slice(&off.to_be_bytes());
+            b[e + 12..e + 16].copy_from_slice(&size.to_be_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn archive_header_checks() {
+        assert!(check("fat-ok", &fat(2, &[(64, 100), (164, 3000)], 4096)));
+        assert!(!check("fat-past-end", &fat(2, &[(64, 100), (164, 4000)], 4096)));
+        assert!(!check("fat-empty-slice", &fat(1, &[(64, 0)], 4096)));
+        assert!(!check("fat-zero", &fat(0, &[], 4096)));
+        assert!(!check("fat-too-many", &fat(65, &[], 4096)));
+        assert!(!check("fat-truncated", &fat(1, &[], 12)));
+        assert!(check("fat-large-tail", &fat(1, &[(64, 20000)], 20064)));
+        let mut macho = vec![0u8; 64];
+        macho[..4].copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
+        assert!(check("macho", &macho));
+        assert!(!check("macho-short", &macho[..32]));
+        assert!(!check("text", b"not an archive"));
+        assert!(!check("short", b"ab"));
+        assert!(!check("empty", b""));
+        assert!(!looks_like_archive(Path::new("/nonexistent/mush8.mtl4a")));
     }
 }
 
