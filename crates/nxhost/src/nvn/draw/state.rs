@@ -12,7 +12,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 
 pub type Pipeline = objc2::runtime::ProtocolObject<dyn MTLRenderPipelineState>;
 
-use super::super::fx::{FastMap, FastSet};
+use super::super::fx::FastMap;
 pub type DepthState = objc2::runtime::ProtocolObject<dyn MTLDepthStencilState>;
 
 #[derive(Clone, Copy)]
@@ -268,7 +268,7 @@ impl Hash for PipeKey {
 #[derive(Default)]
 pub struct States {
     pipelines: FastMap<PipeKey, Option<Shared<Pipeline>>>,
-    pending: FastSet<PipeKey>,
+    pending: super::shaders::Jobs<PipeKey>,
     depth: FastMap<(u64, [u32; 4], bool, bool), Shared<DepthState>>,
 }
 
@@ -350,12 +350,12 @@ impl States {
             }
         }
         let t0 = std::time::Instant::now();
+        let (cs, cm, blend) = (st.color_state, st.channel_mask, st.blend);
+        let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
+        let job = || pipeline_job(key, vs, fs, t, cs, cm, blend, name.clone());
         loop {
             if !self.pending.is_empty() {
-                for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
-                    self.pending.remove(&k);
-                    self.pipelines.insert(k, p);
-                }
+                self.drain();
             }
             if let Some(p) = self.pipelines.get(&key) {
                 return p.clone().ok_or("pipeline failed");
@@ -363,12 +363,12 @@ impl States {
             if !self.pending.contains(&key) {
                 break;
             }
-            if !wait || t0.elapsed() >= *super::shaders::COMPILE_WAIT {
+            if !wait || super::shaders::wait_over() {
                 return Err("pipeline compiling");
             }
+            self.pending.spawn(key, true, job);
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
         }
-        let (cs, cm, blend) = (st.color_state, st.channel_mask, st.blend);
         if let Some(r) = Recorded::of(vs, fs, t, cs, cm, &blend) {
             let wait = wait || super::shaders::sync_mode();
             match claim(&r, wait, |f| crate::kernel::blocking(f)) {
@@ -388,40 +388,37 @@ impl States {
             self.pipelines.insert(key, Some(p.clone()));
             return Ok(p);
         }
-        let (jvs, jfs, jt) = (vs.clone(), fs.clone(), t.clone());
-        let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
         if super::shaders::sync_mode() {
-            let p = crate::kernel::blocking(|| build_pipeline(&jvs, &jfs, &jt, cs, cm, &blend, &name));
+            let p = crate::kernel::blocking(|| build_pipeline(vs, fs, t, cs, cm, &blend, &name));
             self.pipelines.insert(key, p.clone());
             return p.ok_or("pipeline failed");
         }
-        self.pending.insert(key);
-        let label = name.clone();
-        let job: Box<dyn FnOnce() + Send> = Box::new(move || {
-            let p = build_pipeline(&jvs, &jfs, &jt, cs, cm, &blend, &name);
-            DONE.lock().unwrap().push((key, p));
-        });
+        self.pending.spawn(key, wait, job);
         if !wait {
-            super::shaders::spawn_job(job);
             return Err("pipeline compiling");
         }
-        super::shaders::spawn_urgent(job);
         loop {
-            for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
-                self.pending.remove(&k);
-                self.pipelines.insert(k, p);
-            }
+            self.drain();
             if let Some(p) = self.pipelines.get(&key) {
                 if t0.elapsed().as_millis() >= 5 {
-                    eprintln!("[gfx] pipeline {label}: built while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
+                    eprintln!("[gfx] pipeline {name}: built while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
                 }
                 return p.clone().ok_or("pipeline failed");
             }
-            if t0.elapsed() >= *super::shaders::COMPILE_WAIT {
-                eprintln!("[gfx] pipeline {label}: still building after {} ms, drawing without it for now", t0.elapsed().as_millis());
+            if super::shaders::wait_over() {
+                if t0.elapsed().as_millis() >= 5 {
+                    eprintln!("[gfx] pipeline {name}: still building after {} ms, drawing without it for now", t0.elapsed().as_millis());
+                }
                 return Err("pipeline compiling");
             }
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
+    }
+
+    fn drain(&mut self) {
+        for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
+            self.pending.remove(&k);
+            self.pipelines.entry(k).or_insert(p);
         }
     }
 
@@ -458,6 +455,15 @@ impl States {
             })
             .clone()
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pipeline_job(key: PipeKey, vs: &Arc<Compiled>, fs: &Arc<Compiled>, t: &Targets, cs: u32, cm: u32, blend: [u64; 8], name: String) -> Box<dyn FnOnce() + Send> {
+    let (vs, fs, t) = (vs.clone(), fs.clone(), t.clone());
+    Box::new(move || {
+        let p = build_pipeline(&vs, &fs, &t, cs, cm, &blend, &name);
+        DONE.lock().unwrap().push((key, p));
+    })
 }
 
 fn build_pipeline(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, channel_mask: u32, blend: &[u64; 8], name: &str) -> Option<Shared<Pipeline>> {

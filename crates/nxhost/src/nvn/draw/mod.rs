@@ -734,6 +734,7 @@ pub fn write_texels(mut b: TexBuilder, view: u64, region: [i32; 6], data: *const
         let (bw, bh, bpb) = super::format_info(key.format);
         let [x, y, z, w, h, d] = region.map(|v| v.max(0) as usize);
         if w == 0 || h == 0 || data.is_null() {
+        shaders::reset_wait_budget();
             return;
         }
         let row = w.div_ceil(bw as usize) * bpb as usize;

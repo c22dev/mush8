@@ -7,6 +7,7 @@ use objc2_foundation::NSString;
 use objc2_metal::*;
 use super::super::fx::{FastMap, FastSet};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{AcqRel, Relaxed}};
 use std::sync::{Arc, LazyLock, Mutex};
 
 pub type Function = objc2::runtime::ProtocolObject<dyn MTLFunction>;
@@ -56,7 +57,7 @@ impl Default for Recent {
 pub struct Shaders {
     stages: FastMap<(u64, u64), Option<Stage>>,
     funcs: FastMap<Key, Option<Arc<Compiled>>>,
-    pending: FastSet<Key>,
+    pending: Jobs<Key>,
     recent: [Recent; 4],
     recent_i: usize,
     prefetched: FastSet<u64>,
@@ -97,6 +98,68 @@ pub fn spawn_job(f: Job) {
     static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> =
         LazyLock::new(|| job_queue("shader", std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).max(2)));
     let _ = QUEUE.lock().unwrap().send(f);
+}
+
+static BUDGET_T0: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+static DEADLINE: AtomicU64 = AtomicU64::new(0);
+
+pub fn reset_wait_budget() {
+    DEADLINE.store((BUDGET_T0.elapsed() + *COMPILE_WAIT).as_nanos() as u64, Relaxed);
+}
+
+pub fn wait_over() -> bool {
+    BUDGET_T0.elapsed().as_nanos() as u64 >= DEADLINE.load(Relaxed)
+}
+
+pub struct Jobs<K>(FastMap<K, (Arc<AtomicBool>, bool)>);
+
+impl<K> Default for Jobs<K> {
+    fn default() -> Self {
+        Self(FastMap::default())
+    }
+}
+
+impl<K: std::hash::Hash + Eq> Jobs<K> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, k: &K) -> bool {
+        self.0.contains_key(k)
+    }
+
+    pub fn remove(&mut self, k: &K) {
+        self.0.remove(k);
+    }
+
+    fn enqueue(&mut self, key: K, urgent: bool) -> Option<Arc<AtomicBool>> {
+        match self.0.get_mut(&key) {
+            Some((taken, queued)) if urgent && !*queued => {
+                *queued = true;
+                Some(taken.clone())
+            }
+            Some(_) => None,
+            None => {
+                let taken = Arc::new(AtomicBool::new(false));
+                self.0.insert(key, (taken.clone(), urgent));
+                Some(taken)
+            }
+        }
+    }
+
+    pub fn spawn(&mut self, key: K, urgent: bool, make: impl FnOnce() -> Job) {
+        let Some(taken) = self.enqueue(key, urgent) else { return };
+        let job = once(taken, make());
+        if urgent { spawn_urgent(job) } else { spawn_job(job) }
+    }
+}
+
+fn once(taken: Arc<AtomicBool>, job: Job) -> Job {
+    Box::new(move || {
+        if !taken.swap(true, AcqRel) {
+            job();
+        }
+    })
 }
 
 pub fn sync_mode() -> bool {
@@ -231,10 +294,7 @@ impl Shaders {
         let t0 = std::time::Instant::now();
         loop {
             if !self.pending.is_empty() {
-                for (k, r) in std::mem::take(&mut *DONE.lock().unwrap()) {
-                    self.pending.remove(&k);
-                    self.funcs.insert(k, r);
-                }
+                self.drain();
             }
             if let Some(f) = self.funcs.get(&key) {
                 return f.clone().map_or(Lookup::Failed, Lookup::Ready);
@@ -242,9 +302,10 @@ impl Shaders {
             if !self.pending.contains(&key) {
                 break;
             }
-            if !wait || t0.elapsed() >= *COMPILE_WAIT {
+            if !wait || wait_over() {
                 return Lookup::Pending;
             }
+            self.pending.spawn(key, true, || compile_job(s, key));
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
         }
         let blob = unsafe { std::slice::from_raw_parts(s.code as *const u8, s.len) };
@@ -262,41 +323,50 @@ impl Shaders {
             }
             record_compute(s.hash, blob);
         }
-        let blob = blob.to_vec();
         let hash = s.hash;
         if sync_mode() {
-            let r = crate::kernel::blocking(|| compile(&blob, compute, extra_outputs, uint_targets, sint_targets, hash));
+            let r = crate::kernel::blocking(|| compile(blob, compute, extra_outputs, uint_targets, sint_targets, hash));
             self.funcs.insert(key, r.clone());
             return r.map_or(Lookup::Failed, Lookup::Ready);
         }
-        self.pending.insert(key);
-        let job: Job = Box::new(move || {
-            let r = compile(&blob, compute, extra_outputs, uint_targets, sint_targets, hash);
-            DONE.lock().unwrap().push((key, r));
-        });
+        self.pending.spawn(key, wait, || compile_job(s, key));
         if !wait {
-            spawn_job(job);
             return Lookup::Pending;
         }
-        spawn_urgent(job);
         loop {
-            for (k, r) in std::mem::take(&mut *DONE.lock().unwrap()) {
-                self.pending.remove(&k);
-                self.funcs.insert(k, r);
-            }
+            self.drain();
             if let Some(f) = self.funcs.get(&key) {
                 if t0.elapsed().as_millis() >= 5 {
                     eprintln!("[shader] {hash:016x}: compiled while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
                 }
                 return f.clone().map_or(Lookup::Failed, Lookup::Ready);
             }
-            if t0.elapsed() >= *COMPILE_WAIT {
-                eprintln!("[shader] {hash:016x}: still compiling after {} ms, drawing without it for now", t0.elapsed().as_millis());
+            if wait_over() {
+                if t0.elapsed().as_millis() >= 5 {
+                    eprintln!("[shader] {hash:016x}: still compiling after {} ms, drawing without it for now", t0.elapsed().as_millis());
+                }
                 return Lookup::Pending;
             }
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
         }
     }
+
+    fn drain(&mut self) {
+        for (k, r) in std::mem::take(&mut *DONE.lock().unwrap()) {
+            self.pending.remove(&k);
+            self.funcs.entry(k).or_insert(r);
+        }
+    }
+}
+
+fn compile_job(s: &Stage, key: Key) -> Job {
+    let blob = unsafe { std::slice::from_raw_parts(s.code as *const u8, s.len) }.to_vec();
+    let compute = s.local_size.is_some();
+    let (hash, extra_outputs, uint_targets, sint_targets) = key;
+    Box::new(move || {
+        let r = compile(&blob, compute, extra_outputs, uint_targets, sint_targets, hash);
+        DONE.lock().unwrap().push((key, r));
+    })
 }
 
 pub type ComputePipeline = objc2::runtime::ProtocolObject<dyn MTLComputePipelineState>;
@@ -792,5 +862,43 @@ pub fn integer_kind(f: MTLPixelFormat) -> u32 {
         P::R8Uint | P::R16Uint | P::R32Uint | P::RG8Uint | P::RG16Uint | P::RG32Uint | P::RGBA8Uint | P::RGBA16Uint | P::RGBA32Uint | P::RGB10A2Uint => 1,
         P::R8Sint | P::R16Sint | P::R32Sint | P::RG8Sint | P::RG16Sint | P::RG32Sint | P::RGBA8Sint | P::RGBA16Sint | P::RGBA32Sint => 2,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod job_tests {
+    use super::*;
+
+    #[test]
+    fn urgent_requeue_runs_the_job_once() {
+        let mut jobs = Jobs::<u32>::default();
+        let first = jobs.enqueue(1, false).unwrap();
+        let second = jobs.enqueue(1, true).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(jobs.enqueue(1, true).is_none());
+        assert!(jobs.enqueue(1, false).is_none());
+        assert!(jobs.enqueue(2, true).is_some());
+        assert!(jobs.enqueue(2, true).is_none());
+        let runs = Arc::new(AtomicU64::new(0));
+        for taken in [first, second] {
+            let r = runs.clone();
+            once(taken, Box::new(move || {
+                r.fetch_add(1, Relaxed);
+            }))();
+        }
+        assert_eq!(runs.load(Relaxed), 1);
+        jobs.remove(&1);
+        assert!(!jobs.contains(&1));
+        assert!(jobs.enqueue(1, false).is_some());
+    }
+
+    #[test]
+    fn wait_budget_is_shared_until_reset() {
+        DEADLINE.store(0, Relaxed);
+        assert!(wait_over());
+        reset_wait_budget();
+        assert!(!wait_over());
+        DEADLINE.store(0, Relaxed);
+        assert!(wait_over());
     }
 }
