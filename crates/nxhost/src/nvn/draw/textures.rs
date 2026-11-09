@@ -593,12 +593,17 @@ fn stage_with(tex: &Texture, total: usize, pieces: &[Piece], fill: impl FnOnce(&
         return;
     }
     let g = gfx::gpu();
-    let mut staging = STAGING.lock().unwrap();
-    staging.retain(|(cb, _)| !matches!(cb.0.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error));
-    let limit = if memory::left() < memory::TIGHT { STAGING_TIGHT } else { STAGING_MAX };
-    while !staging.is_empty() && staging.iter().map(|s| s.1).sum::<usize>() + total > limit {
-        let (cb, _) = staging.remove(0);
-        cb.0.waitUntilCompleted();
+    let limit = if memory::os_left() < memory::TIGHT { STAGING_TIGHT } else { STAGING_MAX };
+    loop {
+        let oldest = {
+            let mut staging = STAGING.lock().unwrap();
+            staging.retain(|(cb, _)| !matches!(cb.0.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error));
+            if staging.is_empty() || staging.iter().map(|s| s.1).sum::<usize>() + total <= limit {
+                break;
+            }
+            staging.remove(0).0
+        };
+        crate::kernel::blocking(|| oldest.0.waitUntilCompleted());
     }
     let Some(buf) = g.device.0.newBufferWithLength_options(total, MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeWriteCombined) else { return };
     let dst = unsafe { std::slice::from_raw_parts_mut(buf.contents().as_ptr() as *mut u8, total) };
@@ -623,7 +628,7 @@ fn stage_with(tex: &Texture, total: usize, pieces: &[Piece], fill: impl FnOnce(&
     }
     enc.endEncoding();
     cb.commit();
-    staging.push((Shared(cb), total));
+    STAGING.lock().unwrap().push((Shared(cb), total));
 }
 
 static STAGING: std::sync::Mutex<Vec<(Shared<gfx::CommandBuffer>, usize)>> = std::sync::Mutex::new(Vec::new());
