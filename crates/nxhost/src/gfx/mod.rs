@@ -220,13 +220,6 @@ pub fn make_resident(b: &Buffer) {
     }
 }
 
-pub fn release_resident(b: &Buffer) {
-    if let Some(r) = &gpu().residency {
-        r.0.removeAllocation(ProtocolObject::from_ref(b));
-        r.0.commit();
-    }
-}
-
 const PRESENT_MSL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;

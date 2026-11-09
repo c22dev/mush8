@@ -498,8 +498,7 @@ fn build_pipeline_inner(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: 
 }
 
 pub type Buffer = gfx::Buffer;
-const CHUNK: usize = 4 << 20;
-const SPARE: usize = 4;
+const CHUNK: usize = 16 << 20;
 
 #[derive(Default)]
 pub struct Arena {
@@ -562,16 +561,6 @@ impl Arena {
                 self.free.extend(bufs);
             } else {
                 i += 1;
-            }
-        }
-        if self.free.is_empty() {
-            return;
-        }
-        let keep = if gfx::memory::left() < gfx::memory::TIGHT { 0 } else { SPARE };
-        if self.free.len() > keep {
-            self.free.sort_by_key(|b| b.0.length());
-            for b in self.free.drain(keep..) {
-                gfx::release_resident(&b.0);
             }
         }
     }
