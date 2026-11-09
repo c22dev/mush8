@@ -177,7 +177,7 @@ impl Replay<'_> {
                 Cmd::Call(handles) => {
                     if depth < 8 {
                         for h in handles {
-                            if let Some(sub) = cmd::recording(*h) {
+                            if let Some(sub) = lookup(*h) {
                                 self.run(&sub, depth + 1);
                             }
                         }
@@ -547,7 +547,183 @@ static DEBUG: LazyLock<Debug> = LazyLock::new(|| {
     }
 });
 
+thread_local! {
+    static PINNED: std::cell::RefCell<HashMap<u64, std::sync::Arc<Vec<Cmd>>>> = Default::default();
+}
+
+fn lookup(h: u64) -> Option<std::sync::Arc<Vec<Cmd>>> {
+    PINNED.with(|p| p.borrow().get(&h).cloned()).or_else(|| cmd::recording(h))
+}
+
+fn pin_tree(h: u64, depth: usize, out: &mut HashMap<u64, std::sync::Arc<Vec<Cmd>>>) {
+    if out.contains_key(&h) {
+        return;
+    }
+    let Some(c) = cmd::recording(h) else { return };
+    out.insert(h, c.clone());
+    if depth < 8 {
+        for x in c.iter() {
+            if let Cmd::Call(hs) = x {
+                for &sub in hs {
+                    pin_tree(sub, depth + 1, out);
+                }
+            }
+        }
+    }
+}
+
+mod async_gfx {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+
+    pub enum Job {
+        Submit { handles: Vec<u64>, pinned: HashMap<u64, std::sync::Arc<Vec<Cmd>>> },
+        Fence(u64),
+        Present(TexBuilder),
+        FreePool(u64, super::super::objects::MemoryPool),
+    }
+
+    static QUEUE: Mutex<VecDeque<(u64, Job)>> = Mutex::new(VecDeque::new());
+    static WORK: Condvar = Condvar::new();
+    static DONE_LOCK: Mutex<()> = Mutex::new(());
+    static DONE_CV: Condvar = Condvar::new();
+    static ENQ: AtomicU64 = AtomicU64::new(0);
+    static DONE: AtomicU64 = AtomicU64::new(0);
+    static LAST_PRESENT: AtomicU64 = AtomicU64::new(0);
+    pub static FENCES: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(Default::default);
+
+    pub fn on() -> bool {
+        static ON: LazyLock<bool> = LazyLock::new(|| std::env::var("NX_ASYNC_GFX").map_or(cfg!(target_os = "ios"), |v| v.trim() != "0"));
+        *ON
+    }
+
+    pub fn push(job: Job) -> u64 {
+        push_then(job, |_| {})
+    }
+
+    pub fn push_then(job: Job, before: impl FnOnce(u64)) -> u64 {
+        start();
+        let present = matches!(job, Job::Present(_));
+        let seq = {
+            let mut q = QUEUE.lock().unwrap();
+            let seq = ENQ.fetch_add(1, SeqCst) + 1;
+            before(seq);
+            q.push_back((seq, job));
+            seq
+        };
+        WORK.notify_one();
+        if present {
+            wait_for(LAST_PRESENT.swap(seq, SeqCst));
+        } else if seq > DONE.load(SeqCst) + 512 {
+            wait_for(seq - 256);
+        }
+        seq
+    }
+
+    pub fn wait_for(seq: u64) {
+        if DONE.load(SeqCst) >= seq {
+            return;
+        }
+        crate::kernel::blocking(|| {
+            let mut g = DONE_LOCK.lock().unwrap();
+            while DONE.load(SeqCst) < seq {
+                g = DONE_CV.wait(g).unwrap();
+            }
+        });
+    }
+
+    pub fn drain() {
+        if on() {
+            wait_for(ENQ.load(SeqCst));
+        }
+    }
+
+    pub fn submit(handles: &[u64]) {
+        let mut pinned = HashMap::new();
+        for &h in handles {
+            pin_tree(h, 0, &mut pinned);
+        }
+        push(Job::Submit { handles: handles.to_vec(), pinned });
+    }
+
+    fn start() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            std::thread::Builder::new()
+                .name("gfx-submit".into())
+                .stack_size(8 << 20)
+                .spawn(|| {
+                    unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
+                    eprintln!("[gfx] graphics on a separate thread");
+                    loop {
+                        let (seq, job) = {
+                            let mut q = QUEUE.lock().unwrap();
+                            loop {
+                                if let Some(j) = q.pop_front() {
+                                    break j;
+                                }
+                                q = WORK.wait(q).unwrap();
+                            }
+                        };
+                        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job {
+                            Job::Submit { handles, pinned } => {
+                                PINNED.with(|p| *p.borrow_mut() = pinned);
+                                submit_now(&handles);
+                            }
+                            Job::Fence(sync) => fence_now(sync),
+                            Job::Present(b) => present_now(b),
+                            Job::FreePool(obj, p) => free_pool_now(obj, p),
+                        }));
+                        PINNED.with(|p| p.borrow_mut().clear());
+                        if let Err(e) = r {
+                            static WARNED: AtomicBool = AtomicBool::new(false);
+                            if !WARNED.swap(true, SeqCst) {
+                                let msg = e.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| e.downcast_ref::<String>().cloned()).unwrap_or_default();
+                                eprintln!("[gfx] graphics job panicked, skipping it: {msg}");
+                            }
+                        }
+                        {
+                            let _g = DONE_LOCK.lock().unwrap();
+                            DONE.store(seq, SeqCst);
+                        }
+                        DONE_CV.notify_all();
+                    }
+                })
+                .expect("graphics thread");
+        });
+    }
+}
+
 pub fn submit(handles: &[u64]) {
+    if async_gfx::on() {
+        async_gfx::submit(handles);
+    } else {
+        submit_now(handles);
+    }
+}
+
+pub fn free_pool(obj: u64, p: super::objects::MemoryPool) {
+    if async_gfx::on() {
+        async_gfx::push(async_gfx::Job::FreePool(obj, p));
+    } else {
+        free_pool_now(obj, p);
+    }
+}
+
+fn free_pool_now(obj: u64, p: super::objects::MemoryPool) {
+    {
+        let mut s = STATE.lock().unwrap();
+        if s.pools.get(&obj).is_some_and(|q| q.generation == p.generation) {
+            s.pools.remove(&obj);
+        }
+    }
+    forget_memory(p.cpu, p.size);
+    forget_memory(obj | 1 << 63, p.size);
+}
+
+fn submit_now(handles: &[u64]) {
     gfx::wait_foreground();
     static FIRST: std::sync::Once = std::sync::Once::new();
     FIRST.call_once(state::wait_prewarm);
@@ -558,12 +734,13 @@ pub fn submit(handles: &[u64]) {
         e.bank_ok = [false; 3];
         e.textures.frame += 1;
         e.textures.maintain();
+        shaders::reset_wait_budget();
         let Some(cb) = gfx::gpu().queue.0.commandBuffer() else { return };
         let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, draws_since_commit: 0, copies: HashMap::new(), storage_touched: [[(0, 0); 16]; 3] };
         let mut updated = BTreeMap::new();
         let mut programs = std::collections::BTreeSet::new();
         for h in handles {
-            if let Some(cmds) = cmd::recording(*h) {
+            if let Some(cmds) = lookup(*h) {
                 collect_updates(&cmds, 0, &mut updated, &mut programs);
             }
         }
@@ -594,7 +771,7 @@ pub fn submit(handles: &[u64]) {
         }
         TRACE_DRAWS.store(capture || dbg.trace_frame == Some(n) || at, Relaxed);
         for h in handles {
-            if let Some(cmds) = cmd::recording(*h) {
+            if let Some(cmds) = lookup(*h) {
                 r.run(&cmds, 0);
             }
         }
@@ -638,6 +815,16 @@ pub fn forget_memory(addr: u64, size: u64) {
 }
 
 pub fn fence_sync(sync: u64) {
+    if async_gfx::on() {
+        async_gfx::push_then(async_gfx::Job::Fence(sync), |seq| {
+            async_gfx::FENCES.lock().unwrap().insert(sync, seq);
+        });
+        return;
+    }
+    fence_now(sync);
+}
+
+fn fence_now(sync: u64) {
     let mut e = ENGINE.lock().unwrap();
     if let Some(cb) = e.last_submit.clone() {
         e.syncs.insert(sync, cb);
@@ -648,6 +835,7 @@ pub use shaders::precompile;
 pub use state::prewarm;
 
 pub fn finish() {
+    async_gfx::drain();
     let cb = ENGINE.lock().unwrap().last_submit.clone();
     if let Some(cb) = cb {
         crate::kernel::blocking(|| cb.0.waitUntilCompleted());
@@ -655,6 +843,12 @@ pub fn finish() {
 }
 
 pub fn sync_wait(sync: u64) -> u64 {
+    if async_gfx::on() {
+        let seq = async_gfx::FENCES.lock().unwrap().remove(&sync);
+        if let Some(seq) = seq {
+            async_gfx::wait_for(seq);
+        }
+    }
     let cb = ENGINE.lock().unwrap().syncs.remove(&sync);
     match cb {
         Some(cb) => {
@@ -706,10 +900,17 @@ fn count_fps() {
 }
 
 pub fn present(texture: u64) {
+    let Some(b) = super::objects::texture(texture).map(|t| t.builder) else { return };
+    if async_gfx::on() {
+        async_gfx::push(async_gfx::Job::Present(b));
+    } else {
+        present_now(b);
+    }
+}
+
+fn present_now(b: TexBuilder) {
     count_fps();
     objc2::rc::autoreleasepool(|_| {
-        let b = super::objects::texture(texture).map(|t| t.builder);
-        let Some(b) = b else { return };
         let (t, show) = {
             let mut e = ENGINE.lock().unwrap();
             e.forget_dead();
@@ -726,6 +927,7 @@ pub fn present(texture: u64) {
 }
 
 pub fn write_texels(mut b: TexBuilder, view: u64, region: [i32; 6], data: *const u8, strides: Option<(usize, usize)>) {
+    async_gfx::drain();
     super::objects::apply_view(&mut b, view, true);
     objc2::rc::autoreleasepool(|_| {
         let mut e = ENGINE.lock().unwrap();
@@ -734,7 +936,6 @@ pub fn write_texels(mut b: TexBuilder, view: u64, region: [i32; 6], data: *const
         let (bw, bh, bpb) = super::format_info(key.format);
         let [x, y, z, w, h, d] = region.map(|v| v.max(0) as usize);
         if w == 0 || h == 0 || data.is_null() {
-        shaders::reset_wait_budget();
             return;
         }
         let row = w.div_ceil(bw as usize) * bpb as usize;
@@ -860,7 +1061,7 @@ fn collect_updates(cmds: &[Cmd], depth: usize, out: &mut BTreeMap<u64, u64>, pro
             Cmd::Program(p) => programs.extend(p.iter().copied()),
             Cmd::Call(handles) if depth < 8 => {
                 for h in handles {
-                    if let Some(sub) = cmd::recording(*h) {
+                    if let Some(sub) = lookup(*h) {
                         collect_updates(&sub, depth + 1, out, programs);
                     }
                 }
