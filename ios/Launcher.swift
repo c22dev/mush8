@@ -64,6 +64,7 @@ final class Settings: ObservableObject {
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
+    @Published var textures = "auto"
     @Published var disabledMods: [String] = []
     var extra: [String: Any] = [:]
     private var autosave: AnyCancellable?
@@ -95,6 +96,7 @@ final class Settings: ObservableObject {
         fillScreen = json["aspect"] as? String != "16:9"
         hudAtEdges = json["hud"] as? String != "center"
         hudScale = json["hud_scale"] as? Double ?? 1.0
+        textures = json["textures"] as? String ?? "auto"
         disabledMods = json["disabled_mods"] as? [String] ?? []
     }
 
@@ -126,6 +128,7 @@ final class Settings: ObservableObject {
         json["aspect"] = fillScreen ? "fill" : "16:9"
         json["hud"] = hudAtEdges ? "edges" : "center"
         json["hud_scale"] = hudScale
+        json["textures"] = textures
         json["disabled_mods"] = disabledMods
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
@@ -482,6 +485,17 @@ struct LauncherView: View {
                 }
             } footer: {
                 Text("Handheld is lighter on the GPU and battery")
+            }
+            Section {
+                Picker("Textures", selection: $s.textures) {
+                    Text("Auto").tag("auto")
+                    Text("Full").tag("0")
+                    Text("Low").tag("1")
+                    Text("Very low").tag("2")
+                    Text("Ultra low").tag("3")
+                }
+            } footer: {
+                Text("Lower uses less memory but looks blurrier. Auto is Low on 6 GB iPhones and Full otherwise")
             }
             Section {
                 Toggle("Prewarm pipelines", isOn: $s.prewarm)

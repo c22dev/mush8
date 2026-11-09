@@ -553,6 +553,7 @@ pub fn submit(handles: &[u64]) {
         e.forget_dead();
         e.bank_ok = [false; 3];
         e.textures.frame += 1;
+        e.textures.maintain();
         let Some(cb) = gfx::gpu().queue.0.commandBuffer() else { return };
         let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, copies: HashMap::new() };
         let mut updated = BTreeMap::new();

@@ -4,6 +4,7 @@
 mod ios;
 pub mod bc;
 pub mod keyboard;
+pub mod memory;
 pub mod overlay;
 #[cfg(target_os = "ios")]
 mod touch;
@@ -215,6 +216,13 @@ pub fn residency() -> bool {
 pub fn make_resident(b: &Buffer) {
     if let Some(r) = &gpu().residency {
         r.0.addAllocation(ProtocolObject::from_ref(b));
+        r.0.commit();
+    }
+}
+
+pub fn release_resident(b: &Buffer) {
+    if let Some(r) = &gpu().residency {
+        r.0.removeAllocation(ProtocolObject::from_ref(b));
         r.0.commit();
     }
 }

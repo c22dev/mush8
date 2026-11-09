@@ -309,6 +309,9 @@ fn apply_launcher_settings() {
     if let Some(scale) = field("hud_scale") {
         unsafe { std::env::set_var("NX_HUD_SCALE", scale) };
     }
+    if let Some(textures) = field("textures").filter(|_| std::env::var_os("NX_TEX_DROP").is_none()) {
+        unsafe { std::env::set_var("NX_TEX_DROP", textures) };
+    }
 }
 
 fn start(args: Args) -> Result<()> {
