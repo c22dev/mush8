@@ -283,7 +283,7 @@ pub fn spin_wait(site: u64) {
         _ => now,
     };
     if let Some(d) = backoff(now - first) {
-        std::thread::sleep(d);
+        blocking(|| std::thread::sleep(d));
     }
     SPIN.with(|s| s.set((site, Some((first, Instant::now())))));
 }
