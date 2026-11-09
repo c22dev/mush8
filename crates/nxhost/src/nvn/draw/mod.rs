@@ -128,6 +128,7 @@ struct Replay<'a> {
     pass: Option<Pass>,
     heap: Option<&'static gfx::HeapBuffer>,
     passes: u32,
+    draws_since_commit: u32,
     copies: HashMap<(u64, u64), u64>,
 }
 
@@ -289,6 +290,7 @@ impl Replay<'_> {
                 }
                 Cmd::Draw(d) => {
                     self.e.draws += 1;
+                    self.draws_since_commit += 1;
                     if self.draw(d).is_err_and(|e| e.ends_with("compiling")) {
                         self.e.skipped += 1;
                     }
@@ -348,7 +350,8 @@ impl Replay<'_> {
                 }
             }
             self.passes += 1;
-            if self.passes % PASSES_PER_COMMIT == 0 {
+            if self.passes % PASSES_PER_COMMIT == 0 || (*SPLIT_DRAWS > 0 && self.draws_since_commit >= *SPLIT_DRAWS) {
+                self.draws_since_commit = 0;
                 if let Some(next) = gfx::gpu().queue.0.commandBuffer() {
                     commit(&std::mem::replace::<Retained<gfx::CommandBuffer>>(&mut self.cb, next));
                 }
@@ -555,7 +558,7 @@ pub fn submit(handles: &[u64]) {
         e.textures.frame += 1;
         e.textures.maintain();
         let Some(cb) = gfx::gpu().queue.0.commandBuffer() else { return };
-        let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, copies: HashMap::new() };
+        let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, draws_since_commit: 0, copies: HashMap::new() };
         let mut updated = BTreeMap::new();
         let mut programs = std::collections::BTreeSet::new();
         for h in handles {
@@ -662,6 +665,7 @@ pub fn sync_wait(sync: u64) -> u64 {
 }
 
 const PASSES_PER_COMMIT: u32 = 24;
+static SPLIT_DRAWS: LazyLock<u32> = LazyLock::new(|| std::env::var("NX_SPLIT_DRAWS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(80));
 
 fn commit(cb: &gfx::CommandBuffer) {
     if *FPS {
