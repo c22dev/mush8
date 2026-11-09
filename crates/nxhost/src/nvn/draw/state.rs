@@ -349,6 +349,7 @@ impl States {
                 key.push(st.blend[i]);
             }
         }
+        let t0 = std::time::Instant::now();
         loop {
             if !self.pending.is_empty() {
                 for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
@@ -362,7 +363,7 @@ impl States {
             if !self.pending.contains(&key) {
                 break;
             }
-            if !wait {
+            if !wait || t0.elapsed() >= *super::shaders::COMPILE_WAIT {
                 return Err("pipeline compiling");
             }
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
@@ -389,21 +390,39 @@ impl States {
         }
         let (jvs, jfs, jt) = (vs.clone(), fs.clone(), t.clone());
         let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
-        if wait || super::shaders::sync_mode() {
-            let t0 = std::time::Instant::now();
+        if super::shaders::sync_mode() {
             let p = crate::kernel::blocking(|| build_pipeline(&jvs, &jfs, &jt, cs, cm, &blend, &name));
-            if wait && !super::shaders::sync_mode() && t0.elapsed().as_millis() >= 5 {
-                eprintln!("[gfx] pipeline {name}: built while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
-            }
             self.pipelines.insert(key, p.clone());
             return p.ok_or("pipeline failed");
         }
         self.pending.insert(key);
-        super::shaders::spawn_job(Box::new(move || {
+        let label = name.clone();
+        let job: Box<dyn FnOnce() + Send> = Box::new(move || {
             let p = build_pipeline(&jvs, &jfs, &jt, cs, cm, &blend, &name);
             DONE.lock().unwrap().push((key, p));
-        }));
-        Err("pipeline compiling")
+        });
+        if !wait {
+            super::shaders::spawn_job(job);
+            return Err("pipeline compiling");
+        }
+        super::shaders::spawn_urgent(job);
+        loop {
+            for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
+                self.pending.remove(&k);
+                self.pipelines.insert(k, p);
+            }
+            if let Some(p) = self.pipelines.get(&key) {
+                if t0.elapsed().as_millis() >= 5 {
+                    eprintln!("[gfx] pipeline {label}: built while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
+                }
+                return p.clone().ok_or("pipeline failed");
+            }
+            if t0.elapsed() >= *super::shaders::COMPILE_WAIT {
+                eprintln!("[gfx] pipeline {label}: still building after {} ms, drawing without it for now", t0.elapsed().as_millis());
+                return Err("pipeline compiling");
+            }
+            crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
     }
 
     pub fn depth_stencil(&mut self, st: &GState, has_depth: bool, has_stencil: bool) -> Shared<DepthState> {

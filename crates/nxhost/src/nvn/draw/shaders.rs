@@ -64,26 +64,38 @@ pub struct Shaders {
 
 static DONE: LazyLock<Mutex<Vec<(Key, Option<Arc<Compiled>>)>>> = LazyLock::new(Default::default);
 
-pub fn spawn_job(f: Box<dyn FnOnce() + Send>) {
-    static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Box<dyn FnOnce() + Send>>>> = LazyLock::new(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() + Send>>();
-        let rx = Arc::new(Mutex::new(rx));
-        let n = std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).max(2);
-        for i in 0..n {
-            let rx = rx.clone();
-            std::thread::Builder::new()
-                .name(format!("shader-{i}"))
-                .spawn(move || loop {
-                    let job = rx.lock().unwrap().recv();
-                    match job {
-                        Ok(job) => objc2::rc::autoreleasepool(|_| job()),
-                        Err(_) => return,
-                    }
-                })
-                .unwrap();
-        }
-        Mutex::new(tx)
-    });
+pub static COMPILE_WAIT: LazyLock<std::time::Duration> =
+    LazyLock::new(|| std::time::Duration::from_millis(std::env::var("NX_COMPILE_WAIT_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(250)));
+
+type Job = Box<dyn FnOnce() + Send>;
+
+fn job_queue(name: &'static str, threads: usize) -> Mutex<std::sync::mpsc::Sender<Job>> {
+    let (tx, rx) = std::sync::mpsc::channel::<Job>();
+    let rx = Arc::new(Mutex::new(rx));
+    for i in 0..threads {
+        let rx = rx.clone();
+        std::thread::Builder::new()
+            .name(format!("{name}-{i}"))
+            .spawn(move || loop {
+                let job = rx.lock().unwrap().recv();
+                match job {
+                    Ok(job) => objc2::rc::autoreleasepool(|_| job()),
+                    Err(_) => return,
+                }
+            })
+            .unwrap();
+    }
+    Mutex::new(tx)
+}
+
+pub fn spawn_urgent(f: Job) {
+    static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> = LazyLock::new(|| job_queue("shader-urgent", 2));
+    let _ = QUEUE.lock().unwrap().send(f);
+}
+
+pub fn spawn_job(f: Job) {
+    static QUEUE: LazyLock<Mutex<std::sync::mpsc::Sender<Job>>> =
+        LazyLock::new(|| job_queue("shader", std::thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(2).max(2)));
     let _ = QUEUE.lock().unwrap().send(f);
 }
 
@@ -216,6 +228,7 @@ impl Shaders {
 
     pub fn function(&mut self, s: &Stage, extra_outputs: u32, uint_targets: u32, sint_targets: u32, wait: bool) -> Lookup {
         let key = (s.hash, extra_outputs, uint_targets, sint_targets);
+        let t0 = std::time::Instant::now();
         loop {
             if !self.pending.is_empty() {
                 for (k, r) in std::mem::take(&mut *DONE.lock().unwrap()) {
@@ -229,7 +242,7 @@ impl Shaders {
             if !self.pending.contains(&key) {
                 break;
             }
-            if !wait {
+            if !wait || t0.elapsed() >= *COMPILE_WAIT {
                 return Lookup::Pending;
             }
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
@@ -251,21 +264,38 @@ impl Shaders {
         }
         let blob = blob.to_vec();
         let hash = s.hash;
-        if wait || sync_mode() {
-            let t0 = std::time::Instant::now();
+        if sync_mode() {
             let r = crate::kernel::blocking(|| compile(&blob, compute, extra_outputs, uint_targets, sint_targets, hash));
-            if wait && !sync_mode() && t0.elapsed().as_millis() >= 5 {
-                eprintln!("[shader] {hash:016x}: compiled while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
-            }
             self.funcs.insert(key, r.clone());
             return r.map_or(Lookup::Failed, Lookup::Ready);
         }
         self.pending.insert(key);
-        spawn_job(Box::new(move || {
+        let job: Job = Box::new(move || {
             let r = compile(&blob, compute, extra_outputs, uint_targets, sint_targets, hash);
             DONE.lock().unwrap().push((key, r));
-        }));
-        Lookup::Pending
+        });
+        if !wait {
+            spawn_job(job);
+            return Lookup::Pending;
+        }
+        spawn_urgent(job);
+        loop {
+            for (k, r) in std::mem::take(&mut *DONE.lock().unwrap()) {
+                self.pending.remove(&k);
+                self.funcs.insert(k, r);
+            }
+            if let Some(f) = self.funcs.get(&key) {
+                if t0.elapsed().as_millis() >= 5 {
+                    eprintln!("[shader] {hash:016x}: compiled while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
+                }
+                return f.clone().map_or(Lookup::Failed, Lookup::Ready);
+            }
+            if t0.elapsed() >= *COMPILE_WAIT {
+                eprintln!("[shader] {hash:016x}: still compiling after {} ms, drawing without it for now", t0.elapsed().as_millis());
+                return Lookup::Pending;
+            }
+            crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
     }
 }
 
