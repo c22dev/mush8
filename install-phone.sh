@@ -37,13 +37,15 @@ except Exception: pass
 ')"
 echo "device $DEVICE ${MODEL:-unknown model}"
 MAJOR="${MODEL#iPhone}"
+MAJOR="${MAJOR#iPad}"
+MAJOR="${MAJOR%%,*}"
 case "$MODEL" in
-  iPad*) NATIVE_BC=1 ;;
-  iPhone*,*) [ "${MAJOR%%,*}" -ge 16 ] && NATIVE_BC=1 || NATIVE_BC=0 ;;
-  *) NATIVE_BC=0 ;;
+  iPad13,[4-9]|iPad13,1[0167]|iPad14,[3-689]|iPad14,1[01]|iPad15,[3-6]) BIG=1 ;;
+  iPad*,*|iPhone*,*) [ "$MAJOR" -ge 16 ] 2>/dev/null && BIG=1 || BIG=0 ;;
+  *) BIG=0 ;;
 esac
-if [ "$NATIVE_BC" = 1 ] && [ "$NSP" = 0 ]; then
-  echo "iPad or iPhone 15 Pro and newer: using the .nsp files, not the prepared game data"
+if [ "$BIG" = 1 ] && [ "$NSP" = 0 ]; then
+  echo "8 GB device (iPhone 15 Pro and newer, M-series or A17 Pro iPad): using the .nsp files, not the prepared game data"
   NSP=1
 fi
 
