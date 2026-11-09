@@ -39,6 +39,7 @@ pub struct Thread {
     pub cancel: AtomicBool,
     runnable: AtomicBool,
     ready_seq: AtomicU64,
+    seen: AtomicU64,
     cv: Condvar,
 }
 
@@ -89,15 +90,31 @@ pub struct State {
     sync_waiters: Vec<(Arc<Thread>, Vec<usize>)>,
 }
 
+#[derive(Default)]
+#[repr(align(128))]
+struct Gen(AtomicU64);
+
+const SLOTS: usize = 4;
+
+fn slot(core: i32) -> usize {
+    core.max(0) as usize % SLOTS
+}
+
+fn token(generation: u64, core: i32) -> u64 {
+    generation << 2 | slot(core) as u64
+}
+
 pub struct Kernel {
     st: Mutex<State>,
     cv: Condvar,
+    sched_gen: [Gen; SLOTS],
     pub aspace: OnceLock<AddressSpace>,
 }
 
 pub static KERNEL: LazyLock<Kernel> = LazyLock::new(|| Kernel {
     st: Mutex::new(State { next_handle: 0x10, next_thread_id: 0x50, ..Default::default() }),
     cv: Condvar::new(),
+    sched_gen: Default::default(),
     aspace: OnceLock::new(),
 });
 
@@ -114,7 +131,14 @@ impl Kernel {
         self.st.lock().unwrap()
     }
 
+    fn bump(&self, _g: &State, core: i32) {
+        self.sched_gen[slot(core)].0.fetch_add(1, Release);
+    }
+
     fn wake_all(&self, g: &State) {
+        for c in 0..SLOTS as i32 {
+            self.bump(g, c);
+        }
         for t in &g.threads {
             t.cv.notify_one();
         }
@@ -122,6 +146,7 @@ impl Kernel {
     }
 
     fn wake_core(&self, g: &State, core: i32) {
+        self.bump(g, core);
         for t in &g.threads {
             if t.runnable.load(Relaxed) && t.sched_core() == core {
                 t.cv.notify_one();
@@ -184,6 +209,11 @@ fn sched_enabled() -> bool {
     *E.get_or_init(|| std::env::var_os("NX_NO_SCHED").is_none())
 }
 
+fn sched_fast() -> bool {
+    static E: OnceLock<bool> = OnceLock::new();
+    *E.get_or_init(|| std::env::var_os("NX_SCHED_FAST").is_none_or(|v| v != "0"))
+}
+
 impl State {
     fn make_runnable(&mut self, t: &Thread) {
         self.next_seq += 1;
@@ -207,7 +237,14 @@ impl Kernel {
             let r = t.cv.wait_timeout(g, SAFETY_NET).unwrap();
             g = r.0;
         }
+        let core = t.sched_core();
+        t.seen.store(token(self.sched_gen[slot(core)].0.load(Relaxed), core), Relaxed);
         g
+    }
+
+    fn still_scheduled(&self, t: &Thread) -> bool {
+        let core = t.sched_core();
+        t.seen.load(Relaxed) == token(self.sched_gen[slot(core)].0.load(Acquire), core)
     }
 }
 
@@ -230,6 +267,9 @@ fn current_kthread(g: &State) -> Option<Arc<Thread>> {
 }
 
 pub fn sched_point() {
+    if sched_fast() && (!sched_enabled() || KTHREAD.with(|k| k.borrow().as_deref().is_some_and(|t| KERNEL.still_scheduled(t)))) {
+        return;
+    }
     let g = KERNEL.lock();
     if let Some(t) = current_kthread(&g) {
         let _g = KERNEL.wait_scheduled(g, &t);
@@ -421,6 +461,7 @@ pub fn create_thread(entry: u64, arg: u64, stack_top: u64, prio: i32, core: i32)
         cancel: AtomicBool::new(false),
         runnable: AtomicBool::new(false),
         ready_seq: AtomicU64::new(0),
+        seen: AtomicU64::new(u64::MAX),
         cv: Condvar::new(),
     });
     let h = g.add(Obj::Thread(t));
@@ -726,5 +767,158 @@ pub fn describe_current_thread() {
                 eprintln!("        guest thread {h:#x} (id {:#x}) prio {} core {} entry {}", t.id, t.prio.load(Relaxed), t.core.load(Relaxed), crate::diag::symbolize(t.entry));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn kernel() -> Kernel {
+        Kernel { st: Mutex::new(State::default()), cv: Condvar::new(), sched_gen: Default::default(), aspace: OnceLock::new() }
+    }
+
+    fn kthread(prio: i32, core: i32) -> Arc<Thread> {
+        Arc::new(Thread {
+            handle: 0,
+            id: 0,
+            entry: 0,
+            arg: 0,
+            stack_top: 0,
+            tlr: 0,
+            prio: AtomicI32::new(prio),
+            core: AtomicI32::new(core),
+            affinity: AtomicU64::new(1 << core),
+            started: AtomicBool::new(true),
+            exited: AtomicBool::new(false),
+            cancel: AtomicBool::new(false),
+            runnable: AtomicBool::new(false),
+            ready_seq: AtomicU64::new(0),
+            seen: AtomicU64::new(u64::MAX),
+            cv: Condvar::new(),
+        })
+    }
+
+    fn admit(k: &Kernel, t: &Arc<Thread>) {
+        let mut g = k.lock();
+        g.threads.push(t.clone());
+        g.make_runnable(t);
+        k.wake_core(&g, t.sched_core());
+    }
+
+    fn check(k: &Kernel, t: &Thread) -> bool {
+        if k.still_scheduled(t) {
+            return true;
+        }
+        drop(k.wait_scheduled(k.lock(), t));
+        false
+    }
+
+    #[test]
+    fn tokens() {
+        assert_eq!(slot(-2), 0);
+        assert_eq!(slot(3), 3);
+        assert_eq!(slot(5), 1);
+        assert_ne!(token(0, 0), token(0, 1));
+        assert_ne!(token(1, 0), token(0, 0));
+        assert_ne!(token(0, 0), u64::MAX);
+    }
+
+    #[test]
+    fn invalidation() {
+        let k = kernel();
+        let t = kthread(44, 0);
+        let o = kthread(28, 1);
+        assert!(!k.still_scheduled(&t));
+        admit(&k, &t);
+        assert!(!check(&k, &t));
+        assert!(check(&k, &t));
+        admit(&k, &o);
+        assert!(check(&k, &t));
+        {
+            let g = k.lock();
+            o.core.store(0, Relaxed);
+            k.wake_all(&g);
+        }
+        assert!(!k.still_scheduled(&t));
+        {
+            let g = k.lock();
+            o.runnable.store(false, Relaxed);
+            k.wake_core(&g, 0);
+        }
+        assert!(!check(&k, &t));
+        assert!(check(&k, &t));
+        t.core.store(2, Relaxed);
+        assert!(!k.still_scheduled(&t));
+        assert!(!check(&k, &t));
+        assert!(check(&k, &t));
+    }
+
+    #[test]
+    fn preemption() {
+        let k = kernel();
+        let l = kthread(44, 0);
+        let h = kthread(28, 0);
+        admit(&k, &l);
+        k.lock().threads.push(h.clone());
+        let epoch = AtomicU64::new(0);
+        let progress = AtomicUsize::new(0);
+        let (fast, slow, bad) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                loop {
+                    let e = epoch.load(Acquire);
+                    if e == u64::MAX {
+                        break;
+                    }
+                    if check(&k, &l) { &fast } else { &slow }.fetch_add(1, Relaxed);
+                    if e % 2 == 1 && epoch.load(Acquire) == e {
+                        bad.fetch_add(1, Relaxed);
+                    }
+                    progress.fetch_add(1, Release);
+                }
+            });
+            let settle = || {
+                let p = progress.load(Acquire);
+                while progress.load(Acquire) < p + 20 {
+                    std::thread::yield_now();
+                }
+            };
+            for i in 0..300 {
+                let by_prio = i % 2 == 1;
+                if by_prio {
+                    let mut g = k.lock();
+                    h.prio.store(60, Relaxed);
+                    g.make_runnable(&h);
+                    k.wake_core(&g, 0);
+                    drop(g);
+                    settle();
+                    let g = k.lock();
+                    h.prio.store(28, Relaxed);
+                    k.wake_all(&g);
+                    epoch.fetch_add(1, Release);
+                } else {
+                    let mut g = k.lock();
+                    g.make_runnable(&h);
+                    k.wake_core(&g, 0);
+                    epoch.fetch_add(1, Release);
+                }
+                for _ in 0..8 {
+                    std::thread::yield_now();
+                }
+                {
+                    let g = k.lock();
+                    h.runnable.store(false, Relaxed);
+                    k.wake_core(&g, 0);
+                    epoch.fetch_add(1, Release);
+                }
+                settle();
+            }
+            epoch.store(u64::MAX, Release);
+        });
+        assert_eq!(bad.load(Relaxed), 0);
+        assert!(fast.load(Relaxed) > 0);
+        assert!(slow.load(Relaxed) > 0);
     }
 }
