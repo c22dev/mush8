@@ -698,7 +698,8 @@ fn count_fps() {
     *n += 1;
     if now.duration_since(*start).as_secs() >= 1 {
         let gpu = GPU_NS.swap(0, Relaxed) as f32 / 1e6 / *n as f32;
-        eprintln!("[fps] {:.1} fps, worst frame {worst:.1} ms, GPU {gpu:.1} ms/frame", *n as f32 / now.duration_since(*start).as_secs_f32());
+        let uploads = textures::UPLOAD_NS.swap(0, Relaxed) as f32 / 1e6;
+        eprintln!("[fps] {:.1} fps, worst frame {worst:.1} ms, GPU {gpu:.1} ms/frame, texture uploads {uploads:.0} ms", *n as f32 / now.duration_since(*start).as_secs_f32());
         *s = Some((now, now, 0, 0.0));
     }
 }
