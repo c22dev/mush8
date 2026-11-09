@@ -9,8 +9,9 @@ use objc2_core_video::*;
 use objc2_foundation::{NSDictionary, NSNumber, NSString, NSURL};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, TryRecvError, channel, sync_channel};
 use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 static SEEKS: LazyLock<Mutex<HashMap<u64, i64>>> = LazyLock::new(Default::default);
 
@@ -19,6 +20,8 @@ pub fn seek_all(extractor: u64, us: i64) {
 }
 
 const AHEAD: usize = 4;
+const FIRST_WAIT: Duration = Duration::from_millis(250);
+const FRAME_WAIT: Duration = Duration::from_millis(8);
 
 struct Worker {
     frames: Receiver<Vec<u8>>,
@@ -36,25 +39,44 @@ pub struct FrameSource {
     extractor: u64,
     layout: (usize, usize),
     worker: Worker,
+    first: Option<Vec<u8>>,
+    behind: usize,
 }
 
 impl FrameSource {
     pub fn open(source: Source, extractor: u64, stride: usize, rows: usize) -> Option<Self> {
         let worker = spawn(source.clone(), 0, stride, rows)?;
-        Some(Self { source, extractor, layout: (stride, rows), worker })
+        let first = worker.frames.recv_timeout(FIRST_WAIT).ok();
+        Some(Self { source, extractor, layout: (stride, rows), worker, first, behind: 0 })
+    }
+
+    fn wait(&mut self) -> Result<Vec<u8>, RecvTimeoutError> {
+        if let Some(f) = self.first.take() {
+            return Ok(f);
+        }
+        match self.worker.frames.try_recv() {
+            Ok(f) => Ok(f),
+            Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+            Err(TryRecvError::Empty) => crate::kernel::blocking(|| self.worker.frames.recv_timeout(FRAME_WAIT)),
+        }
     }
 
     pub fn next_frame(&mut self, out: &mut Vec<u8>) -> bool {
         if let Some(us) = SEEKS.lock().unwrap().remove(&self.extractor) {
-            match spawn(self.source.clone(), us, self.layout.0, self.layout.1) {
-                Some(w) => self.worker = w,
+            match crate::kernel::blocking(|| spawn(self.source.clone(), us, self.layout.0, self.layout.1)) {
+                Some(w) => {
+                    self.worker = w;
+                    self.first = None;
+                    self.behind = 0;
+                }
                 None => return false,
             }
         }
-        let mut frame = match self.worker.frames.recv_timeout(std::time::Duration::from_millis(8)) {
+        let mut frame = match self.wait() {
             Ok(f) => f,
             Err(RecvTimeoutError::Disconnected) => return false,
             Err(RecvTimeoutError::Timeout) => {
+                self.behind = (self.behind + 1).min(AHEAD);
                 static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                 if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[movie] video decoder is late: showing the previous frame");
@@ -68,6 +90,11 @@ impl FrameSource {
                 return true;
             }
         };
+        while self.behind > 0 {
+            let Ok(newer) = self.worker.frames.try_recv() else { break };
+            let _ = self.worker.recycle.send(std::mem::replace(&mut frame, newer));
+            self.behind -= 1;
+        }
         std::mem::swap(out, &mut frame);
         let _ = self.worker.recycle.send(frame);
         true
@@ -94,7 +121,7 @@ fn spawn(source: Source, us: i64, stride: usize, rows: usize) -> Option<Worker> 
             }
         })
         .ok()?;
-    ready.recv_timeout(std::time::Duration::from_secs(5)).ok()?.then_some(Worker { frames, recycle })
+    ready.recv_timeout(Duration::from_secs(5)).ok()?.then_some(Worker { frames, recycle })
 }
 
 fn run_webm(movie: &super::webm::Movie, us: i64, tx: &SyncSender<Vec<u8>>, spare: &Receiver<Vec<u8>>, stride: usize, rows: usize) {

@@ -122,8 +122,31 @@ struct Track {
     selected: bool,
 }
 
+enum Samples {
+    File(std::io::BufReader<std::fs::File>),
+    Memory(std::io::Cursor<Vec<u8>>),
+}
+
+impl std::io::Read for Samples {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Samples::File(f) => f.read(b),
+            Samples::Memory(m) => m.read(b),
+        }
+    }
+}
+
+impl std::io::Seek for Samples {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Samples::File(f) => f.seek(to),
+            Samples::Memory(m) => m.seek(to),
+        }
+    }
+}
+
 struct Extractor {
-    reader: Option<mp4::Mp4Reader<std::io::Cursor<Vec<u8>>>>,
+    reader: Option<mp4::Mp4Reader<Samples>>,
     webm: Option<std::sync::Arc<webm::Movie>>,
     tracks: Vec<Track>,
     host_file: Option<std::path::PathBuf>,
@@ -236,13 +259,31 @@ fn open(e: &mut Extractor, name: &str, data: Vec<u8>) -> u64 {
 fn open_mp4(e: &mut Extractor, name: &str, data: Vec<u8>) -> u64 {
     let dir = std::path::Path::new("work/movie_cache");
     let _ = std::fs::create_dir_all(dir);
-    let file = dir.join(std::path::Path::new(name).file_name().unwrap_or_default());
-    if std::fs::metadata(&file).map(|m| m.len()).ok() != Some(data.len() as u64) {
-        let _ = std::fs::write(&file, &data);
-    }
-    e.host_file = Some(std::fs::canonicalize(&file).unwrap_or(file));
+    let base = std::path::Path::new(name).file_name().unwrap_or_default();
+    let file = dir.join(base);
     let size = data.len() as u64;
-    let reader = match mp4::Mp4Reader::read_header(std::io::Cursor::new(data), size) {
+    if std::fs::metadata(&file).map(|m| m.len()).ok() != Some(size) {
+        let mut tmp = base.to_owned();
+        tmp.push(".tmp");
+        let tmp = dir.join(tmp);
+        if std::fs::write(&tmp, &data).and_then(|_| std::fs::rename(&tmp, &file)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    let file = std::fs::canonicalize(&file).unwrap_or(file);
+    let cached = std::fs::File::open(&file).ok().filter(|f| f.metadata().is_ok_and(|m| m.len() == size));
+    let samples = match cached {
+        Some(f) => {
+            drop(data);
+            e.host_file = Some(file);
+            Samples::File(std::io::BufReader::new(f))
+        }
+        None => {
+            eprintln!("[movie] {name}: cache file unusable, reading from memory");
+            Samples::Memory(std::io::Cursor::new(data))
+        }
+    };
+    let reader = match mp4::Mp4Reader::read_header(samples, size) {
         Ok(r) => r,
         Err(err) => {
             eprintln!("[movie] {name}: {err}");
@@ -481,9 +522,13 @@ fn nv12_layout(w: u32, h: u32) -> (u32, u32) {
 fn decoder_call(slot: u64, a: &Args) -> u64 {
     let this = a.0[0];
     let mut signals = Vec::new();
-    let r = {
+    let r = if slot == 2 {
+        configure(this, a.0[1])
+    } else if slot == 11 {
+        queue_input(this, a.0[3] as u32 as usize, a.0[4] as i64, a.0[5] as u32, &mut signals)
+    } else {
         let mut o = obj();
-        let Objects { decoders, extractors } = &mut *o;
+        let decoders = &mut o.decoders;
         match decoders.get_mut(&this) {
             None => UNKNOWN_ERROR,
             Some(d) => match slot {
@@ -495,35 +540,6 @@ fn decoder_call(slot: u64, a: &Args) -> u64 {
                         del(this);
                     }
                     return OK;
-                }
-                2 => {
-                    let md = a.0[1];
-                    if let Some(key) = md_find_i64(md, TRACK_KEY) {
-                        d.track = Some(((key as u64) >> 8, (key & 0xFF) as usize));
-                    }
-                    d.width = md_find_i32(md, "width").unwrap_or(0) as u32;
-                    d.height = md_find_i32(md, "height").unwrap_or(0) as u32;
-                    d.channels = md_find_i32(md, "channel-count").unwrap_or(2) as u32;
-                    d.sample_rate = md_find_i32(md, "sample-rate").unwrap_or(48000) as u32;
-                    if d.video {
-                        let source = d.track.and_then(|(e, _)| extractors.get(&e)).and_then(|e| match &e.webm {
-                            Some(m) => Some(video::Source::Webm(m.clone())),
-                            None => e.host_file.clone().map(video::Source::File),
-                        });
-                        let (stride, rows) = nv12_layout(d.width, d.height);
-                        match source.and_then(|s| video::FrameSource::open(s, d.track.map_or(0, |t| t.0), stride as usize, rows as usize)) {
-                            Some(src) => {
-                                d.frames = Some(src);
-                                OK
-                            }
-                            None => {
-                                eprintln!("[movie] decoder {this:#x}: cannot open the video for decoding");
-                                UNKNOWN_ERROR
-                            }
-                        }
-                    } else {
-                        OK
-                    }
                 }
                 3 => {
                     d.events = a.0[1];
@@ -555,14 +571,6 @@ fn decoder_call(slot: u64, a: &Args) -> u64 {
                 10 => {
                     let Some(b) = d.inputs.get_mut(a.0[1] as usize) else { return UNKNOWN_ERROR };
                     buffer_set(a.0[2], b.as_mut_ptr(), b.len(), 0);
-                    OK
-                }
-                11 => {
-                    let (size, pts, flags) = (a.0[3] as u32 as usize, a.0[4] as i64, a.0[5] as u32);
-                    decode(d, size, pts, flags, &mut signals);
-                    if !d.free_outputs.is_empty() {
-                        signals.push(event(d, 0));
-                    }
                     OK
                 }
                 12 => match d.ready.pop_front() {
@@ -629,6 +637,85 @@ fn decoder_call(slot: u64, a: &Args) -> u64 {
     r
 }
 
+fn configure(this: u64, md: u64) -> u64 {
+    let track = md_find_i64(md, TRACK_KEY).map(|key| ((key as u64) >> 8, (key & 0xFF) as usize));
+    let (width, height) = (md_find_i32(md, "width").unwrap_or(0) as u32, md_find_i32(md, "height").unwrap_or(0) as u32);
+    let channels = md_find_i32(md, "channel-count").unwrap_or(2) as u32;
+    let sample_rate = md_find_i32(md, "sample-rate").unwrap_or(48000) as u32;
+    let (source, extractor) = {
+        let mut o = obj();
+        let Objects { decoders, extractors } = &mut *o;
+        let Some(d) = decoders.get_mut(&this) else { return UNKNOWN_ERROR };
+        if track.is_some() {
+            d.track = track;
+        }
+        (d.width, d.height, d.channels, d.sample_rate) = (width, height, channels, sample_rate);
+        if !d.video {
+            return OK;
+        }
+        let source = d.track.and_then(|(e, _)| extractors.get(&e)).and_then(|e| match &e.webm {
+            Some(m) => Some(video::Source::Webm(m.clone())),
+            None => e.host_file.clone().map(video::Source::File),
+        });
+        (source, d.track.map_or(0, |t| t.0))
+    };
+    let (stride, rows) = nv12_layout(width, height);
+    let Some(src) = source.and_then(|s| crate::kernel::blocking(|| video::FrameSource::open(s, extractor, stride as usize, rows as usize))) else {
+        eprintln!("[movie] decoder {this:#x}: cannot open the video for decoding");
+        return UNKNOWN_ERROR;
+    };
+    match obj().decoders.get_mut(&this) {
+        Some(d) => {
+            d.frames = Some(src);
+            OK
+        }
+        None => UNKNOWN_ERROR,
+    }
+}
+
+fn queue_input(this: u64, size: usize, pts: i64, flags: u32, signals: &mut Vec<u64>) -> u64 {
+    let (out, mut data, mut src) = {
+        let mut o = obj();
+        let Some(d) = o.decoders.get_mut(&this) else { return UNKNOWN_ERROR };
+        if flags & FLAG_END_OF_STREAM != 0 && size == 0 {
+            d.eos = true;
+        }
+        let Some(out) = d.free_outputs.pop() else { return OK };
+        let src = if d.video && !d.eos { d.frames.take() } else { None };
+        (out, std::mem::take(&mut d.outputs[out]), src)
+    };
+    let produced = src.as_mut().is_some_and(|s| s.next_frame(&mut data));
+    let mut o = obj();
+    let Some(d) = o.decoders.get_mut(&this) else { return OK };
+    if let Some(s) = src {
+        d.frames.get_or_insert(s);
+    }
+    let produced = produced || !d.video && size > 0;
+    if !d.video && size > 0 {
+        data.clear();
+        data.resize(1024 * d.channels as usize * 2, 0);
+    }
+    if !produced && d.eos {
+        data.clear();
+    }
+    let len = data.len();
+    d.outputs[out] = data;
+    if produced || d.eos {
+        if !d.format_sent {
+            d.format_sent = true;
+            signals.push(event(d, 2));
+        }
+        d.ready.push_back((out, len, pts, if d.eos { FLAG_END_OF_STREAM } else { 0 }));
+        signals.push(event(d, 1));
+    } else {
+        d.free_outputs.push(out);
+    }
+    if !d.free_outputs.is_empty() {
+        signals.push(event(d, 0));
+    }
+    OK
+}
+
 fn output_format(d: &Decoder, md: u64) {
     if d.video {
         let (stride, rows) = nv12_layout(d.width, d.height);
@@ -642,39 +729,5 @@ fn output_format(d: &Decoder, md: u64) {
         md_set_string(md, "mime", "audio/raw");
         md_set_i32(md, "sample-rate", d.sample_rate as i32);
         md_set_i32(md, "channel-count", d.channels as i32);
-    }
-}
-
-fn decode(d: &mut Decoder, size: usize, pts: i64, flags: u32, signals: &mut Vec<u64>) {
-    if flags & FLAG_END_OF_STREAM != 0 && size == 0 {
-        d.eos = true;
-    }
-    let Some(out) = d.free_outputs.pop() else { return };
-    let data = &mut d.outputs[out];
-    let produced = if d.video {
-        match d.frames.as_mut() {
-            Some(src) if !d.eos => src.next_frame(data),
-            _ => false,
-        }
-    } else if size > 0 {
-        data.clear();
-        data.resize(1024 * d.channels as usize * 2, 0);
-        true
-    } else {
-        false
-    };
-    if produced || d.eos {
-        if !d.format_sent {
-            d.format_sent = true;
-            signals.push(event(d, 2));
-        }
-        let len = if produced { d.outputs[out].len() } else { 0 };
-        if !produced {
-            d.outputs[out].clear();
-        }
-        d.ready.push_back((out, len, pts, if d.eos { FLAG_END_OF_STREAM } else { 0 }));
-        signals.push(event(d, 1));
-    } else {
-        d.free_outputs.push(out);
     }
 }
