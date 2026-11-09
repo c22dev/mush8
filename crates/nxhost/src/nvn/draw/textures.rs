@@ -627,6 +627,12 @@ pub fn compare_fn(nvn: u32) -> MTLCompareFunction {
     }
 }
 
+static MAX_ANISO: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    let older_gpu = cfg!(target_os = "ios") && !gfx::gpu().device.0.supportsBCTextureCompression();
+    let default = if older_gpu { 4 } else { 16 };
+    std::env::var("NX_MAX_ANISO").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default).clamp(1, 16)
+});
+
 fn make_sampler(b: Option<&[u8; 0x60]>) -> objc2::rc::Retained<Sampler> {
     let d = MTLSamplerDescriptor::new();
     if let Some(b) = b {
@@ -668,7 +674,7 @@ fn make_sampler(b: Option<&[u8; 0x60]>) -> objc2::rc::Retained<Sampler> {
         }
         let aniso = f32_at(b, 0x40);
         if aniso.is_finite() {
-            d.setMaxAnisotropy((aniso as usize).clamp(1, 16));
+            d.setMaxAnisotropy((aniso as usize).clamp(1, *MAX_ANISO));
         }
     } else {
         d.setMinFilter(MTLSamplerMinMagFilter::Linear);
