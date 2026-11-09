@@ -199,6 +199,7 @@ pub fn host_impl(name: &str) -> Option<HostFn> {
             let b = a.0[1];
             let p = MemoryPool { cpu: rd(b + 8), size: rd(b + 0x10), flags: rd(b + 0x18) };
             init_pool_struct(a.0[0], &p);
+            crate::gfx::heap_touch(p.cpu, p.size);
             state().pools.insert(a.0[0], p);
             1
         },

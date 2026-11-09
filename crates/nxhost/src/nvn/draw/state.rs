@@ -131,7 +131,7 @@ mod segmented_heap_tests {
             std::env::remove_var("NX_GPU_HEAP_CHUNK_BYTES");
             assert!(mapped);
             let h = gfx::heap().unwrap();
-            assert_eq!(h.chunks.iter().map(|c| c.size).collect::<Vec<_>>(), vec![chunk as u64, chunk as u64, page as u64]);
+            assert_eq!(h.live().map(|c| c.size).collect::<Vec<_>>(), vec![chunk as u64, chunk as u64, page as u64]);
             assert!(h.buffer_range(h.base + chunk as u64 - 4, 8).is_none());
             assert!(h.buffer_range(h.base + (size - 4) as u64, 4).is_some());
             assert!(h.buffer_range(h.base + (size - 4) as u64, 8).is_none());
@@ -158,7 +158,7 @@ mod segmented_heap_tests {
             let cb = gfx::gpu().queue.0.commandBuffer().unwrap();
             let enc = cb.computeCommandEncoder().unwrap();
             enc.setComputePipelineState(&pipeline);
-            for chunk in &h.chunks {
+            for chunk in h.live() {
                 enc.useResource_usage(ProtocolObject::from_ref(&*chunk.buffer.0), MTLResourceUsage::Read | MTLResourceUsage::Write);
             }
             enc.useResource_usage(ProtocolObject::from_ref(&*gfx::gpu().zeros.0), MTLResourceUsage::Read);

@@ -261,7 +261,7 @@ impl Textures {
             upload(b, &key, &tex.0, levels, skip);
         }
         let len = storage_len(b, &key);
-        if !render_target && !depth_format && cpu_writable(b) && len > 0 && gfx::heap().is_some_and(|h| h.gpu_addr(key.addr).is_some() && h.gpu_addr(key.addr + len - 1).is_some()) {
+        if !render_target && !depth_format && cpu_writable(b) && len > 0 && gfx::heap().is_some_and(|h| h.contains(key.addr, len)) {
             self.uploaded.insert(key, (memory_hashes(key.addr, len), self.frame, len));
         }
         if render_target && super::super::gfx_integer_block_format(key.format) {
@@ -468,7 +468,7 @@ fn upload_inner(b: &TexBuilder, key: &TexKey, tex: &Texture, levels: u32, skip: 
     };
     match super::super::texture_layout(b.as_ptr() as u64) {
         Some((shape, layout)) => {
-            if heap.gpu_addr(key.addr).is_none() || heap.gpu_addr(key.addr + layout.total_size - 1).is_none() || shape.width != key.width {
+            if !heap.contains(key.addr, layout.total_size) || shape.width != key.width {
                 return;
             }
             let levels = levels.min((layout.level_offsets.len() as u32).saturating_sub(skip));
@@ -495,7 +495,7 @@ fn upload_inner(b: &TexBuilder, key: &TexKey, tex: &Texture, levels: u32, skip: 
             let stride = u32_at(b, 0x5c);
             let rows = key.height.div_ceil(bh);
             let row_bytes = key.width.div_ceil(bw) * bpb;
-            if stride < row_bytes || heap.gpu_addr(key.addr + (stride * rows) as u64 - 1).is_none() {
+            if stride < row_bytes || !heap.contains(key.addr, (stride * rows) as u64) {
                 return;
             }
             let src = unsafe { std::slice::from_raw_parts(key.addr as *const u8, (stride * rows) as usize) };

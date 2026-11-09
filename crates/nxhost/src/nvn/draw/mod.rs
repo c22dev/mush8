@@ -130,6 +130,7 @@ struct Replay<'a> {
     passes: u32,
     draws_since_commit: u32,
     copies: HashMap<(u64, u64), u64>,
+    storage_touched: [[(u64, u64); 16]; 3],
 }
 
 impl Replay<'_> {
@@ -402,7 +403,7 @@ impl Replay<'_> {
             if let Some(&gpu) = self.copies.get(&(addr, size)) {
                 return gpu;
             }
-            if h.gpu_addr(addr).is_some() && h.gpu_addr(addr + size - 1).is_some() {
+            if h.contains(addr, size) {
                 let data = unsafe { std::slice::from_raw_parts(addr as *const u8, size as usize) };
                 let a = self.e.arena.alloc_bytes(data);
                 if a.new_chunk {
@@ -558,7 +559,7 @@ pub fn submit(handles: &[u64]) {
         e.textures.frame += 1;
         e.textures.maintain();
         let Some(cb) = gfx::gpu().queue.0.commandBuffer() else { return };
-        let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, draws_since_commit: 0, copies: HashMap::new() };
+        let mut r = Replay { e: &mut e, cb, pass: None, heap: None, passes: 0, draws_since_commit: 0, copies: HashMap::new(), storage_touched: [[(0, 0); 16]; 3] };
         let mut updated = BTreeMap::new();
         let mut programs = std::collections::BTreeSet::new();
         for h in handles {

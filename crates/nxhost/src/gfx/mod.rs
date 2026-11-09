@@ -75,7 +75,9 @@ pub struct HeapChunk {
 }
 
 pub struct HeapBuffer {
-    pub chunks: Vec<HeapChunk>,
+    chunks: Vec<OnceLock<Option<HeapChunk>>>,
+    created: std::sync::atomic::AtomicU64,
+    overlap: u64,
     pub base: u64,
     pub size: u64,
     pub chunk_size: u64,
@@ -86,28 +88,28 @@ static HEAP: std::sync::RwLock<Option<&'static HeapBuffer>> = std::sync::RwLock:
 pub fn wrap_heap(base: u64, size: u64) -> bool {
     let device = &gpu().device.0;
     let limit = device.maxBufferLength() as u64;
-    let requested = std::env::var("NX_GPU_HEAP_CHUNK_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(limit);
+    let lazy = std::env::var("NX_LAZY_HEAP").map_or(cfg!(target_os = "ios"), |v| v.trim() != "0");
+    let default = if lazy { size.div_ceil(MAX_HEAP_CHUNKS as u64).next_multiple_of(crate::mem::PAGE) } else { limit };
+    let requested = std::env::var("NX_GPU_HEAP_CHUNK_BYTES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(default);
     let chunk_size = requested.min(limit) / crate::mem::PAGE * crate::mem::PAGE;
     if base == 0 || size == 0 || base.checked_add(size).is_none() || chunk_size == 0 || size.div_ceil(chunk_size) > MAX_HEAP_CHUNKS as u64 {
         eprintln!("[gfx] cannot map heap: size {size:#x}, Metal maxBufferLength {limit:#x}, chunk {chunk_size:#x}");
         return false;
     }
-    let mut chunks = Vec::new();
-    let mut offset = 0;
-    while offset < size {
-        let len = chunk_size.min(size - offset);
-        let ptr = std::ptr::NonNull::new((base + offset) as *mut std::ffi::c_void).unwrap();
-        let Some(buffer) = (unsafe { device.newBufferWithBytesNoCopy_length_options_deallocator(ptr, len as usize, MTLResourceOptions::StorageModeShared, None) }) else {
-            eprintln!("[gfx] could not wrap heap chunk {:#x}+{len:#x}, Metal maxBufferLength {limit:#x}", base + offset);
-            return false;
-        };
-        let gpu = buffer.gpuAddress();
-        chunks.push(HeapChunk { buffer: Shared(buffer), base: base + offset, size: len, gpu });
-        offset += len;
+    let count = size.div_ceil(chunk_size) as usize;
+    let heap: &'static HeapBuffer = Box::leak(Box::new(HeapBuffer { chunks: (0..count).map(|_| OnceLock::new()).collect(), created: Default::default(), overlap: if lazy { (128 << 20).min(limit.saturating_sub(chunk_size)) } else { 0 }, base, size, chunk_size }));
+    if !lazy && (0..count).any(|i| heap.chunk(i).is_none()) {
+        return false;
     }
-    eprintln!("[gfx] guest heap {base:#x}+{size:#x} mapped in {} GPU chunks (chunk {chunk_size:#x}, maxBufferLength {limit:#x})", chunks.len());
-    *HEAP.write().unwrap() = Some(Box::leak(Box::new(HeapBuffer { chunks, base, size, chunk_size })));
+    eprintln!("[gfx] guest heap {base:#x}+{size:#x} in {count} GPU chunks of {chunk_size:#x}{}", if lazy { ", created when used" } else { "" });
+    *HEAP.write().unwrap() = Some(heap);
     true
+}
+
+pub fn heap_touch(addr: u64, size: u64) {
+    if let Some(h) = heap() {
+        h.touch(addr, size);
+    }
 }
 
 pub fn heap() -> Option<&'static HeapBuffer> {
@@ -119,6 +121,56 @@ pub fn max_buffer_len() -> u64 {
 }
 
 impl HeapBuffer {
+    fn chunk(&self, i: usize) -> Option<&HeapChunk> {
+        let cell = self.chunks.get(i)?;
+        if let Some(c) = cell.get() {
+            return c.as_ref();
+        }
+        let mut fresh = false;
+        let c = cell
+            .get_or_init(|| {
+                let start = i as u64 * self.chunk_size;
+                let len = (self.chunk_size + self.overlap).min(self.size - start);
+                let ptr = std::ptr::NonNull::new((self.base + start) as *mut std::ffi::c_void)?;
+                let buffer = unsafe { gpu().device.0.newBufferWithBytesNoCopy_length_options_deallocator(ptr, len as usize, MTLResourceOptions::StorageModeShared, None) };
+                let Some(buffer) = buffer else {
+                    eprintln!("[gfx] could not wrap heap chunk {:#x}+{len:#x}", self.base + start);
+                    return None;
+                };
+                fresh = true;
+                let gpu = buffer.gpuAddress();
+                Some(HeapChunk { buffer: Shared(buffer), base: self.base + start, size: len, gpu })
+            })
+            .as_ref();
+        if fresh {
+            self.created.fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        c
+    }
+
+    pub fn contains(&self, addr: u64, size: u64) -> bool {
+        addr.checked_sub(self.base).is_some_and(|off| inside(self.size, off, size))
+    }
+
+    pub fn touch(&self, addr: u64, size: u64) {
+        let Some(off) = addr.checked_sub(self.base) else { return };
+        if size == 0 || off >= self.size {
+            return;
+        }
+        let end = (off + size).min(self.size);
+        for i in (off / self.chunk_size)..end.div_ceil(self.chunk_size) {
+            self.chunk(i as usize);
+        }
+    }
+
+    pub fn live(&self) -> impl Iterator<Item = &HeapChunk> {
+        self.chunks.iter().filter_map(|c| c.get().and_then(Option::as_ref))
+    }
+
+    pub fn version(&self) -> u64 {
+        self.created.load(std::sync::atomic::Ordering::Acquire) + 1
+    }
+
     pub fn gpu_addr(&self, addr: u64) -> Option<u64> {
         let (chunk, offset) = self.buffer_range(addr, 1)?;
         Some(chunk.gpu + offset as u64)
@@ -126,44 +178,65 @@ impl HeapBuffer {
 
     pub fn buffer_range(&self, addr: u64, size: u64) -> Option<(&HeapChunk, usize)> {
         let offset = addr.checked_sub(self.base)?;
-        let index = chunk_index(self.size, self.chunk_size, offset, size)?;
-        let chunk = self.chunks.get(index)?;
+        let index = chunk_index(self.size, self.chunk_size, self.overlap, offset, size)?;
+        let chunk = self.chunk(index)?;
         Some((chunk, (addr - chunk.base) as usize))
     }
 
     pub fn gpu_addresses(&self) -> [u64; MAX_HEAP_CHUNKS] {
         let mut out = [0; MAX_HEAP_CHUNKS];
         for (i, chunk) in self.chunks.iter().enumerate() {
-            out[i] = chunk.gpu;
+            if let Some(Some(c)) = chunk.get() {
+                out[i] = c.gpu;
+            }
         }
         out
     }
 }
 
-fn chunk_index(total: u64, chunk: u64, offset: u64, size: u64) -> Option<usize> {
+fn inside(total: u64, offset: u64, size: u64) -> bool {
+    size > 0 && offset.checked_add(size).is_some_and(|end| end <= total)
+}
+
+fn chunk_index(total: u64, chunk: u64, overlap: u64, offset: u64, size: u64) -> Option<usize> {
     let end = offset.checked_add(size)?;
-    if chunk == 0 || size == 0 || end > total || offset / chunk != (end - 1) / chunk {
+    if chunk == 0 || size == 0 || end > total {
         return None;
     }
-    Some((offset / chunk) as usize)
+    let index = offset / chunk;
+    (end <= index * chunk + chunk + overlap).then_some(index as usize)
 }
 
 #[cfg(test)]
 mod heap_tests {
-    use super::chunk_index;
+    use super::{chunk_index, inside};
+
+    #[test]
+    fn inside_checks_the_whole_range() {
+        assert!(inside(250, 0, 250));
+        assert!(inside(250, 249, 1));
+        assert!(!inside(250, 249, 2));
+        assert!(!inside(250, 250, 1));
+        assert!(!inside(250, 0, 0));
+        assert!(!inside(250, u64::MAX, 2));
+    }
 
     #[test]
     fn ranges_respect_chunk_and_heap_edges() {
-        assert_eq!(chunk_index(250, 100, 99, 1), Some(0));
-        assert_eq!(chunk_index(250, 100, 100, 1), Some(1));
-        assert_eq!(chunk_index(250, 100, 99, 2), None);
-        assert_eq!(chunk_index(250, 100, 200, 50), Some(2));
-        assert_eq!(chunk_index(250, 100, 200, 51), None);
-        assert_eq!(chunk_index(250, 100, 250, 1), None);
-        assert_eq!(chunk_index(250, 100, u64::MAX, 2), None);
-        assert_eq!(chunk_index(250, 100, 0, 0), None);
-        assert_eq!(chunk_index(250, 0, 0, 1), None);
-        assert_eq!(chunk_index(0, 100, 0, 1), None);
+        assert_eq!(chunk_index(250, 100, 0, 99, 1), Some(0));
+        assert_eq!(chunk_index(250, 100, 0, 100, 1), Some(1));
+        assert_eq!(chunk_index(250, 100, 0, 99, 2), None);
+        assert_eq!(chunk_index(250, 100, 0, 200, 50), Some(2));
+        assert_eq!(chunk_index(250, 100, 0, 200, 51), None);
+        assert_eq!(chunk_index(250, 100, 0, 250, 1), None);
+        assert_eq!(chunk_index(250, 100, 20, 99, 2), Some(0));
+        assert_eq!(chunk_index(250, 100, 20, 90, 30), Some(0));
+        assert_eq!(chunk_index(250, 100, 20, 90, 31), None);
+        assert_eq!(chunk_index(250, 100, 20, 200, 50), Some(2));
+        assert_eq!(chunk_index(250, 100, 0, u64::MAX, 2), None);
+        assert_eq!(chunk_index(250, 100, 0, 0, 0), None);
+        assert_eq!(chunk_index(250, 0, 0, 0, 1), None);
+        assert_eq!(chunk_index(0, 100, 0, 0, 1), None);
     }
 }
 
