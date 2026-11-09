@@ -59,18 +59,28 @@ pub fn is_compressed(nvn: u32) -> bool {
 struct Entry {
     tex: Shared<Texture>,
     used: u64,
+    seen: u64,
     skip: u32,
 }
 
-const TRIM_AGE: u64 = 150;
+const TRIM_AGE: u64 = 50;
+const TRIM_FRAMES: u64 = 30;
 const TRIM_MIN_GAIN: usize = 32 << 20;
-const EMERGENCY_AGE: u64 = 2;
+const EMERGENCY_AGE: u64 = 10;
+const EMERGENCY_FRAMES: u64 = 2;
+const EMERGENCY_MIN_GAIN: usize = 16 << 20;
+
+fn now_tick() -> u64 {
+    static T0: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    T0.elapsed().as_millis() as u64 / 100
+}
 
 #[derive(Default)]
 pub struct Textures {
     map: FastMap<TexKey, Entry>,
     pinned: FastSet<TexKey>,
     created: u64,
+    tick: u64,
     last_check: Option<std::time::Instant>,
     last_log: Option<std::time::Instant>,
     block_views: Vec<(TexKey, Shared<Texture>)>,
@@ -121,9 +131,10 @@ impl Textures {
         if exact && self.pinned.insert(key) && self.map.get(&key).is_some_and(|e| e.skip > 0) {
             self.forget(&FastSet::from_iter([key]));
         }
-        let frame = self.frame;
+        let (frame, tick) = (self.frame, self.tick);
         if let Some(e) = self.map.get_mut(&key) {
-            e.used = frame;
+            e.used = tick;
+            e.seen = frame;
             let (t, skip) = (e.tex.clone(), e.skip);
             if !render_target {
                 if let Some((mut hashes, checked, len)) = self.uploaded.get(&key).copied() {
@@ -158,7 +169,7 @@ impl Textures {
                     cb.commit();
                     self.aliases.entry(bk).or_default().push((alias.clone(), soft));
                     self.pinned.insert(key);
-                    self.map.insert(key, Entry { tex: alias.clone(), used: frame, skip: 0 });
+                    self.map.insert(key, Entry { tex: alias.clone(), used: tick, seen: frame, skip: 0 });
                     return Some((key, alias));
                 }
             }
@@ -178,7 +189,7 @@ impl Textures {
                 };
                 if let Some(v) = v {
                     let v = Shared(v);
-                    self.map.insert(key, Entry { tex: v.clone(), used: frame, skip: 0 });
+                    self.map.insert(key, Entry { tex: v.clone(), used: tick, seen: frame, skip: 0 });
                     return Some((key, v));
                 }
             }
@@ -189,7 +200,7 @@ impl Textures {
             eprintln!("[gfx] sampled virtual-pool texture not rendered yet: {key:?} same-address keys {near:?}");
         }
         let (tex, skip) = self.create(b, key, format, render_target)?;
-        self.map.insert(key, Entry { tex: tex.clone(), used: frame, skip });
+        self.map.insert(key, Entry { tex: tex.clone(), used: self.tick, seen: self.frame, skip });
         self.storage.entry(TexKey { format: 0, ..key }).or_insert((key.format, tex.clone()));
         Some((key, tex))
     }
@@ -213,9 +224,10 @@ impl Textures {
         if !render_target {
             self.created += 1;
             if self.created % 8 == 0 && *memory::EMERGENCY > 0 {
+                self.tick = now_tick();
                 let left = memory::left();
                 if left < *memory::EMERGENCY {
-                    self.trim(EMERGENCY_AGE, 0, "emergency", left);
+                    self.trim((EMERGENCY_AGE, EMERGENCY_FRAMES), EMERGENCY_MIN_GAIN, "emergency", left);
                 }
             }
         }
@@ -277,13 +289,13 @@ impl Textures {
         self.storage.retain(|base, (format, _)| !keys.contains(&TexKey { format: *format, ..*base }));
     }
 
-    fn trim(&mut self, age: u64, min_gain: usize, why: &str, left: u64) {
-        let before = self.frame.saturating_sub(age);
+    fn trim(&mut self, (age, frames): (u64, u64), min_gain: usize, why: &str, left: u64) {
+        let (before, frame) = (self.tick.saturating_sub(age), self.frame.saturating_sub(frames));
         let mut bytes = 0;
         let dropped: FastSet<TexKey> = self
             .map
             .iter()
-            .filter(|(k, e)| e.used < before && is_compressed(k.format) && !self.pinned.contains(k))
+            .filter(|(k, e)| e.used < before && e.seen < frame && is_compressed(k.format) && !self.pinned.contains(k))
             .inspect(|(_, e)| bytes += MTLAllocation::allocatedSize(&*e.tex.0))
             .map(|(k, _)| *k)
             .collect();
@@ -295,6 +307,7 @@ impl Textures {
     }
 
     pub fn maintain(&mut self) {
+        self.tick = now_tick();
         let now = std::time::Instant::now();
         if self.last_check.is_some_and(|t| now - t < std::time::Duration::from_millis(250)) {
             return;
@@ -302,7 +315,7 @@ impl Textures {
         self.last_check = Some(now);
         let left = memory::left();
         if *memory::TRIM > 0 && left < *memory::TRIM {
-            self.trim(TRIM_AGE, TRIM_MIN_GAIN, "low-memory", left);
+            self.trim((TRIM_AGE, TRIM_FRAMES), TRIM_MIN_GAIN, "low-memory", left);
         }
         if self.last_log.is_none_or(|t| now - t >= std::time::Duration::from_secs(10)) {
             self.last_log = Some(now);
