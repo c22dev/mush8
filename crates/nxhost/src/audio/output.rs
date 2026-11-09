@@ -33,6 +33,7 @@ const FADE_OUT: f64 = 0.005;
 pub(super) const FADE_IN: f64 = 0.04;
 const MUTE_TIMEOUT: Duration = Duration::from_millis(50);
 const WATCH: Duration = Duration::from_millis(500);
+const RETRY_MAX: Duration = Duration::from_secs(8);
 
 #[cfg(target_os = "macos")]
 const OUTPUT_SUBTYPE: u32 = objc2_audio_toolbox::kAudioUnitSubType_DefaultOutput;
@@ -282,7 +283,7 @@ struct Director {
     gate: Arc<Gate>,
     system: Option<SystemSink>,
     sink: Option<Sink>,
-    stalled: bool,
+    stalled: Option<(Instant, Duration)>,
 }
 
 impl Director {
@@ -341,13 +342,19 @@ impl Director {
 
     fn revive(&mut self) {
         if !self.stopped() {
-            self.stalled = false;
+            self.stalled = None;
             return;
         }
-        if !self.stalled {
-            eprintln!("[audio] output stopped by the system, restarting it");
-            self.stalled = true;
-        }
+        let now = Instant::now();
+        let delay = match self.stalled {
+            None => {
+                eprintln!("[audio] output stopped by the system, restarting it");
+                WATCH
+            }
+            Some((at, _)) if now < at => return,
+            Some((_, d)) => (d * 2).min(RETRY_MAX),
+        };
+        self.stalled = Some((now + delay, delay));
         match self.sink {
             Some(Sink::Mixer(_)) => {
                 unsafe { AudioOutputUnitStart(self.out.0) };
@@ -422,7 +429,7 @@ pub fn start(rate: u32, frames: usize, source: Source) -> Output {
             .name("audio-route".into())
             .spawn(move || {
                 let system = if spatial { SystemSink::new(f, rate) } else { None };
-                Director { out: Arc::new(out), mixer: Arc::new(mixer), gate, system, sink: None, stalled: false }.run(t, rx)
+                Director { out: Arc::new(out), mixer: Arc::new(mixer), gate, system, sink: None, stalled: None }.run(t, rx)
             })
             .unwrap();
         Ok(Engine { router, events: tx })
