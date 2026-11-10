@@ -88,6 +88,9 @@ pub fn is_str_s(w: u32) -> bool {
 pub fn fmov_w_s(d: Reg, n: Reg) -> u32 {
     0x1E26_0000 | (n << 5) | d
 }
+pub fn fmov_s_w(d: Reg, n: Reg) -> u32 {
+    0x1E27_0000 | (n << 5) | d
+}
 pub fn fmul_s(d: Reg, n: Reg, m: Reg) -> u32 {
     0x1E20_0800 | (m << 16) | (n << 5) | d
 }
