@@ -125,7 +125,7 @@ mods/
 ## Credits
 Thanks to everyone who contributed :
 - [codedpalette](https://github.com/codedpalette) : a bunch of fixes and improvements
-- [hchzr](https://github.com/hchzr) : 4K and 60 fps split screen
+- [hczr](https://github.com/hczr-dev) : 4K and 60 fps split screen
 - [lyccccy](https://github.com/lyccccy) : GPU heap split, so iPhones with less memory can render
 - [FritteHD](https://github.com/FritteHD) : browser phone pad
 - [justr4mzi](https://github.com/justr4mzi) : kernel signal, Mii and video decoder fixes
