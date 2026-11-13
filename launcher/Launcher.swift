@@ -163,9 +163,8 @@ final class Settings: ObservableObject {
             "nextendo_pid": NSNumber(value: nextendoPid), "nextendo_name": nextendoName, "nickname": nickname, "nickname_source": nicknameSource,
             "country": country,
             "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion, "touchscreen": touchscreen,
-            "handheld": handheld, "uhd": uhd, "dynamic_resolution": dynamicResolution, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
+            "handheld": handheld, "uhd": uhd, "dynamic_resolution": dynamicResolution, "anisotropy": anisotropy, "texture_filter": textureFilter, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
-            "anisotropy": anisotropy, "texture_filter": textureFilter,
             "disabled_mods": disabledMods,
         ]
         try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
