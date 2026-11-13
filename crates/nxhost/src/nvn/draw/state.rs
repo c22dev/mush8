@@ -110,6 +110,7 @@ pub struct Res {
     pub heap_size: u64,
     pub heap_chunk_size: u64,
     pub zero_gpu: u64,
+    pub lod_bias: [f32; 32],
 }
 
 #[cfg(all(test, target_os = "macos"))]

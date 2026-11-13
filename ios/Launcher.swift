@@ -64,6 +64,10 @@ final class Settings: ObservableObject {
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
+    @Published var anisotropy = 0
+    @Published var lodBias = 0.0
+    @Published var textureFilter = "game"
+    @Published var dynamicResolution = true
     @Published var textures = "auto"
     @Published var disabledMods: [String] = []
     var extra: [String: Any] = [:]
@@ -96,6 +100,10 @@ final class Settings: ObservableObject {
         fillScreen = json["aspect"] as? String != "16:9"
         hudAtEdges = json["hud"] as? String != "center"
         hudScale = json["hud_scale"] as? Double ?? 1.0
+        anisotropy = json["anisotropy"] as? Int ?? 0
+        lodBias = json["lod_bias"] as? Double ?? 0.0
+        textureFilter = json["texture_filter"] as? String ?? (json["trilinear"] as? Bool == true ? "trilinear" : "game")
+        dynamicResolution = json["dynamic_resolution"] as? Bool ?? true
         textures = json["textures"] as? String ?? "auto"
         disabledMods = json["disabled_mods"] as? [String] ?? []
     }
@@ -128,6 +136,11 @@ final class Settings: ObservableObject {
         json["aspect"] = fillScreen ? "fill" : "16:9"
         json["hud"] = hudAtEdges ? "edges" : "center"
         json["hud_scale"] = hudScale
+        json["anisotropy"] = anisotropy
+        json["lod_bias"] = lodBias
+        json["texture_filter"] = textureFilter
+        json["trilinear"] = nil
+        json["dynamic_resolution"] = dynamicResolution
         json["textures"] = textures
         json["disabled_mods"] = disabledMods
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
@@ -496,6 +509,37 @@ struct LauncherView: View {
                 }
             } footer: {
                 Text("Lower uses less memory but looks blurrier. Auto is Low on 6 GB iPhones and Full otherwise")
+            }
+            Section {
+                Toggle("Dynamic resolution", isOn: $s.dynamicResolution)
+            } footer: {
+                Text("Lowers the resolution in races when the GPU is busy (update 4.0.1 only)")
+            }
+            Section {
+                Picker("Anisotropic filtering", selection: $s.anisotropy) {
+                    Text("Game default").tag(0)
+                    ForEach([2, 4, 8, 16], id: \.self) { n in Text("\(n)x").tag(n) }
+                }
+            } footer: {
+                Text("Keeps textures sharp on surfaces seen at an angle")
+            }
+            Section {
+                Picker("Texture filtering", selection: $s.textureFilter) {
+                    Text("Game default").tag("game")
+                    Text("Bilinear").tag("bilinear")
+                    Text("Trilinear").tag("trilinear")
+                }
+            } footer: {
+                Text("Trilinear blends texture detail levels, bilinear is a little faster")
+            }
+            Section {
+                HStack {
+                    Text("Texture LOD bias")
+                    Slider(value: $s.lodBias, in: -2...2, step: 0.25)
+                    Text(s.lodBias == 0 ? "0" : String(format: "%+.2f", s.lodBias)).monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                }
+            } footer: {
+                Text("Below 0 shows sharper textures in the distance")
             }
             Section {
                 Toggle("Prewarm pipelines", isOn: $s.prewarm)
