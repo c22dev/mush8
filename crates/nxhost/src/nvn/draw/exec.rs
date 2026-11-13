@@ -205,7 +205,7 @@ impl Replay<'_> {
                     .unwrap_or_else(|| self.e.textures.fallback(kind, &t)),
                 None => self.e.textures.dummy(kind),
             };
-            let sampler = self.e.textures.sampler(sb.as_ref());
+            let sampler = self.e.textures.sampler(sb.as_ref(), &tex.0);
             let slot = c.iface.samplers.get(&b).copied().unwrap_or(0);
             bound.push((b, tex, slot, sampler));
         }

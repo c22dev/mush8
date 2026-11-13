@@ -309,6 +309,15 @@ fn apply_launcher_settings() {
     if let Some(scale) = field("hud_scale") {
         unsafe { std::env::set_var("NX_HUD_SCALE", scale) };
     }
+    if let Some(aniso) = field("anisotropy").filter(|v| v.parse::<u32>().is_ok_and(|n| n > 1)) {
+        unsafe { std::env::set_var("NX_ANISO", aniso) };
+    }
+    if field("dynamic_resolution").as_deref() == Some("false") {
+        unsafe { std::env::set_var("NX_DYNRES", "0") };
+    }
+    if let Some(filter) = field("texture_filter").filter(|v| v == "bilinear" || v == "trilinear") {
+        unsafe { std::env::set_var("NX_TEXTURE_FILTER", filter) };
+    }
     if let Some(textures) = field("textures").filter(|_| std::env::var_os("NX_TEX_DROP").is_none()) {
         unsafe { std::env::set_var("NX_TEX_DROP", textures) };
     }
