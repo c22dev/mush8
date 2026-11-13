@@ -131,7 +131,7 @@ fn main() -> Result<()> {
                             ),
                         }
                     }
-                    if let Some(&s) = rewrite::aspect_stores(&id).iter().find(|&&s| c.overlaps(s, 4)) {
+                    if let Some(&s) = rewrite::aspect_stores(&id).iter().find(|&&s| c.overlaps(s, 4)).or_else(|| rewrite::aspect_consts(&id).iter().find(|&&s| c.overlaps(s, 8))) {
                         anyhow::bail!("{} changes {name} at {s:#x}, where Mush8 needs its own Fill screen patch: turn that mod off", c.source.display());
                     }
                     let bytes = c.apply(&mut m.image).with_context(|| name.clone())?;
