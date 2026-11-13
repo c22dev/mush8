@@ -11,6 +11,8 @@ struct NextendoLogin {
     let pid: UInt64
     let name: String
     let token: String
+    let access: String
+    let country: String
 }
 
 enum Nextendo {
@@ -19,6 +21,11 @@ enum Nextendo {
     static let authorize = URL(string: "https://nextendo.network/oauth/authorize")!
     static let tokenURL = URL(string: "https://nextendo.network/api/oauth/token")!
     static let nexTokenURL = URL(string: "https://nextendo.network/api/nex-token")!
+    static let meURL = URL(string: "https://nextendo.network/api/me")!
+    static let profileURL = URL(string: "https://nextendo.network/api/profile")!
+    static let userInfoURL = URL(string: "https://nextendo.network/api/oauth/userinfo")!
+    static let renewedRefresh = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Mush8/nextendo-refresh")
+    static let onlineStatusURL = URL(string: "https://nextendo.network/api/online-status")!
     static let callbackPort: UInt16 = 47823
 
     struct Failure: LocalizedError {
@@ -57,6 +64,7 @@ enum Nextendo {
         if let error = query["error"] { throw Failure("Nextendo refused the sign-in (\(error))") }
         guard let code = query["code"], !code.isEmpty else { throw Failure("Nextendo sent no sign-in code") }
         if let stale = inFlight { _ = try? await stale.value }
+        try? FileManager.default.removeItem(at: renewedRefresh)
         try await token(["grant_type": "authorization_code", "client_id": clientID, "code": code, "code_verifier": verifier, "redirect_uri": redirect])
         return try await freshLogin()
     }
@@ -72,6 +80,10 @@ enum Nextendo {
     }
 
     private static func freshLogin() async throws -> NextendoLogin {
+        if let renewed = try? String(contentsOf: renewedRefresh, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines), !renewed.isEmpty {
+            try NextendoKeychain.write("refresh_token", renewed)
+        }
+        try? FileManager.default.removeItem(at: renewedRefresh)
         let refresh = NextendoKeychain.read("refresh_token")
         guard !refresh.isEmpty else { throw Failure("Sign in to Nextendo under Multiplayer first") }
         let access = try await token(["grant_type": "refresh_token", "client_id": clientID, "refresh_token": refresh])
@@ -81,10 +93,117 @@ enum Nextendo {
         guard let nex = json["nex_token"] as? String, !nex.isEmpty, let pid = (json["pid"] as? NSNumber)?.uint64Value, pid != 0 else {
             throw Failure("Nextendo gave no game token: the account needs a confirmed e-mail and a linked Discord account")
         }
-        return NextendoLogin(pid: pid, name: json["username"] as? String ?? "", token: nex)
+        func lookup(_ url: URL) -> URLRequest {
+            var r = URLRequest(url: url, timeoutInterval: 5)
+            r.setValue("Bearer \(access)", forHTTPHeaderField: "Authorization")
+            return r
+        }
+        let (meRequest, infoRequest) = (lookup(meURL), lookup(userInfoURL))
+        async let me = try? send(meRequest)
+        async let info = try? send(infoRequest)
+        let account = ((await me)?["account"] as? [String: Any]) ?? [:]
+        let display = ((await info)?["display_name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        let country = (account["country"] as? String ?? "").uppercased()
+        return NextendoLogin(pid: pid, name: display.isEmpty ? json["username"] as? String ?? "" : display, token: nex, access: access, country: country)
+    }
+
+    static func syncMii(folder: URL, login: NextendoLogin) async {
+        let dir = miisFolder(in: folder)
+        let file = dir.appendingPathComponent(accountMiiName)
+        let tokens = [login.token, login.access]
+        for token in tokens {
+            var get = URLRequest(url: profileURL, timeoutInterval: 5)
+            get.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            guard let json = try? await send(get), json.keys.contains("profile") else { continue }
+            let profile = json["profile"] as? [String: Any] ?? [:]
+            if json["profile"] != nil, !(json["profile"] is [String: Any]), !(json["profile"] is NSNull) { return }
+            let stored = profile["mii"]
+            if let text = stored as? String, !text.isEmpty {
+                guard let mii = Data(base64Encoded: text), mii.count == storeDataSize else { return }
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                if (try? Data(contentsOf: file)) != mii { try? mii.write(to: file, options: .atomic) }
+                return
+            }
+            guard stored == nil || stored is NSNull || (stored as? String)?.isEmpty == true else { return }
+            try? FileManager.default.removeItem(at: file)
+            guard let mii = firstImportedMii(in: dir) else { return }
+            var body = profile
+            body["mii"] = mii.base64EncodedString()
+            guard let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+            let order = [token] + tokens.filter { $0 != token }
+            Task.detached {
+                for writer in order {
+                    var put = URLRequest(url: profileURL, timeoutInterval: 10)
+                    put.httpMethod = "PUT"
+                    put.setValue("Bearer \(writer)", forHTTPHeaderField: "Authorization")
+                    put.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    put.httpBody = data
+                    if (try? await send(put)) != nil { return }
+                }
+            }
+            return
+        }
+    }
+
+    static func freshAccess() async throws -> String {
+        let refresh = NextendoKeychain.read("refresh_token")
+        guard !refresh.isEmpty else { throw Failure("Sign in to Nextendo under Multiplayer first") }
+        return try await token(["grant_type": "refresh_token", "client_id": clientID, "refresh_token": refresh])
+    }
+
+    enum Gate: Equatable {
+        case allowed
+        case refused(String)
+        case unknown(String)
+
+        init(status: Int, json: [String: Any]) {
+            guard status == 200 else {
+                self = .unknown("HTTP \(status)" + ((json["error"] as? String).map { ": \($0)" } ?? ""))
+                return
+            }
+            switch json["allow"] as? Bool {
+            case true?: self = .allowed
+            case false?: self = .refused(json["reason"] as? String ?? "")
+            case nil: self = .unknown("HTTP 200 without an answer")
+            }
+        }
+
+        var log: String {
+            switch self {
+            case .allowed: "allowed"
+            case .refused(let reason): "refused (\(reason.isEmpty ? "no reason given" : reason))"
+            case .unknown(let detail): "not checked (\(detail))"
+            }
+        }
+
+        var problem: String? {
+            guard case .refused(let reason) = self else { return nil }
+            let why = switch reason {
+            case "discord_unlinked": "this account isn't linked to Discord. Open your account page on nextendo.network and use \"link on Discord\""
+            case "unverified": "this account's e-mail address isn't confirmed. Confirm it from the e-mail Nextendo sent you"
+            case "elsewhere": "this account is already online on another device. Leave online play there first"
+            case "disabled": "this account is disabled"
+            case "unknown": "it doesn't recognise this account. Sign out and sign in again under Multiplayer"
+            default: "it gave the reason \"\(reason.isEmpty ? "none" : reason)\""
+            }
+            return "Nextendo refuses online play: \(why)."
+        }
+    }
+
+    static func onlineGate(_ token: String) async -> Gate {
+        var request = URLRequest(url: onlineStatusURL, timeoutInterval: 8)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            return Gate(status: (response as? HTTPURLResponse)?.statusCode ?? 0, json: json)
+        } catch {
+            return .unknown(error.localizedDescription)
+        }
     }
 
     static func signOut() {
+        try? FileManager.default.removeItem(at: renewedRefresh)
         try? NextendoKeychain.write("refresh_token", "")
     }
 

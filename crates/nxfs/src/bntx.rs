@@ -10,12 +10,13 @@ pub struct Texture {
     pub format: u32,
     pub width: u32,
     pub height: u32,
-    mips: u32,
-    block_height_log2: u32,
-    tile_mode: u16,
-    depth: u32,
-    layers: u32,
-    mip_offsets: usize,
+    pub mips: u32,
+    pub block_height_log2: u32,
+    pub tile_mode: u16,
+    pub depth: u32,
+    pub layers: u32,
+    pub mip_offsets: usize,
+    pub info: usize,
 }
 
 fn u16_at(b: &[u8], o: usize) -> Result<u16> {
@@ -49,6 +50,7 @@ pub fn textures(data: &[u8]) -> Result<Vec<Texture>> {
             layers: u32_at(data, t + 0x30)?,
             block_height_log2: u32_at(data, t + 0x34)? & 7,
             mip_offsets: u64_at(data, t + 0x70)?,
+            info: t,
         });
     }
     Ok(out)
@@ -117,6 +119,10 @@ impl Texture {
         let at = u64_at(data, self.mip_offsets)?;
         let tiled = data.get(at..at + tiled_size(self.width, self.height, self.block_height_log2)).context("BNTX texture data cut short")?;
         Ok(untile(tiled, self.width, self.height, self.block_height_log2))
+    }
+
+    pub fn data_offset(&self, data: &[u8]) -> Result<usize> {
+        u64_at(data, self.mip_offsets)
     }
 
     pub fn write(&self, data: &mut [u8], rgba: &[u8], width: u32, height: u32) -> Result<()> {

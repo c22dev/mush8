@@ -61,7 +61,7 @@ fn pixel_bytes(k: Kind) -> usize {
     }
 }
 
-fn block_bytes(k: Kind) -> usize {
+pub fn block_bytes(k: Kind) -> usize {
     if matches!(k, Kind::Bc1 | Kind::Bc4(_)) { 8 } else { 16 }
 }
 

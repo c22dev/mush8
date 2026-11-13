@@ -17,8 +17,11 @@ pub mod mii;
 mod nfp;
 pub mod nifm;
 pub mod nextendo;
+mod nextrace;
+pub mod nexweb;
 mod nsd;
 mod pl;
+mod prepo;
 mod sfdnsres;
 mod ssl;
 mod time;
@@ -50,6 +53,7 @@ pub fn open(name: &str) -> Arc<dyn Service> {
         "sfdnsres" if nextendo::enabled() => Arc::new(sfdnsres::Resolver),
         "nsd:u" | "nsd:a" if nextendo::enabled() => Arc::new(nsd::Nsd),
         "ssl" if nextendo::enabled() => ssl::open(),
+        "prepo:u" | "prepo:a" | "prepo:a2" | "prepo:m" | "prepo:s" if nextendo::enabled() => Arc::new(prepo::Prepo(name.to_string())),
         "nfp:user" => nfp::open(),
         "set" => Arc::new(set::Settings),
         "pctl" | "pctl:s" | "pctl:a" | "pctl:r" => Arc::new(Table {

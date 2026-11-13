@@ -7,10 +7,12 @@ cd "$(dirname "$0")"
 MODE=""
 DEVICE=""
 SHADERS=0
+ROMFS=0
 for a in "$@"; do
   case "$a" in
-    --install|--ipa) MODE="$a" ;;
+    --install|--ipa|--signed-ipa) MODE="$a" ;;
     --shaders) SHADERS=1 ;;
+    --romfs) ROMFS=1 ;;
     *) DEVICE="$a" ;;
   esac
 done
@@ -54,12 +56,64 @@ cat data/pipelines.tsv work/pipelines.tsv 2>/dev/null | awk 'NF && !seen[$0]++' 
 STAMP="$({ cat "$LIST.new"; echo "$SOURCE"; } | shasum | cut -d' ' -f1)"
 mv "$LIST.new" "$LIST"
 
-if [ "$SHADERS" = 1 ] || [ ! -f "$CACHE/index.tsv" ] || [ "$(cat "$CACHE/pipelines.stamp" 2>/dev/null)" != "$STAMP" ]; then
+if [ "$SHADERS" = 1 ] || [ ! -f "$CACHE/index.tsv" ] || [ ! -d "$CACHE/pso4-scripts" ] || [ "$(cat "$CACHE/pipelines.stamp" 2>/dev/null)" != "$STAMP" ]; then
   echo "precompiling shaders for iOS (log: work/precompile_ios.log)…"
   NX_SHADER_SDK=iphoneos NX_SHADER_CACHE="$CACHE_ROOT" ./target/release/nxhost --update "$UPDATE" --precompile > work/precompile_ios.log 2>&1 \
     || { tail -20 work/precompile_ios.log; exit 1; }
   tail -3 work/precompile_ios.log
   echo "$STAMP" > "$CACHE/pipelines.stamp"
+fi
+
+PSO_GPUS="${PSO_GPUS:-}"
+PSO_IOS_MIN="${PSO_IOS_MIN:-$(xcrun --sdk iphoneos --show-sdk-version | cut -d. -f1).0}"
+PSO="$CACHE/pso4"
+if [ -n "$PSO_GPUS" ]; then
+  JOBS="${PSO_JOBS:-$(( $(sysctl -n hw.logicalcpu) / 2 ))}"
+  for G in $(echo "$PSO_GPUS" | tr ',' ' '); do
+    A="applegpu_${G#applegpu_}"
+    mkdir -p "$PSO/batches/$A"
+    for F in "$PSO/batches/$A"/p*.mtl4a; do
+      [ -e "$F" ] && [ ! -e "$CACHE/pso4-scripts/$(basename "$F" .mtl4a).mtl4-json" ] && rm -f "$F" "${F%.mtl4a}.stamp"
+    done
+    for S in "$CACHE"/pso4-scripts/p*.mtl4-json; do
+      N="$(basename "$S" .mtl4-json)"
+      H="$(shasum "$S" | cut -d' ' -f1)-$PSO_IOS_MIN"
+      [ -f "$PSO/batches/$A/$N.mtl4a" ] && [ "$(cat "$PSO/batches/$A/$N.stamp" 2>/dev/null)" = "$H" ] && continue
+      printf '%s %s %s %s\n' "$A" "$S" "$PSO/batches/$A/$N" "$H"
+    done
+  done > work/pso_jobs.txt
+  if [ -s work/pso_jobs.txt ]; then
+    echo "building $(wc -l < work/pso_jobs.txt | tr -d ' ') pipeline batches with metal-tt for $PSO_GPUS (iOS $PSO_IOS_MIN, $JOBS at a time, log: work/pso_ios.log)…"
+    PSO_IOS_MIN="$PSO_IOS_MIN" xargs -P "$JOBS" -n 4 sh -c 'xcrun -sdk iphoneos metal-tt -arch "$1" -ios-version-min "$PSO_IOS_MIN" "$2" -o "$3.tmp.mtl4a" && mv "$3.tmp.mtl4a" "$3.mtl4a" && echo "$4" > "$3.stamp" || { rm -f "$3.tmp.mtl4a"; echo "metal-tt failed: $2 ($1)"; }' _ < work/pso_jobs.txt > work/pso_ios.log 2>&1
+    if grep -q 'metal-tt failed' work/pso_ios.log; then grep 'metal-tt failed' work/pso_ios.log | head -5; exit 1; fi
+  fi
+  for G in $(echo "$PSO_GPUS" | tr ',' ' '); do
+    A="applegpu_${G#applegpu_}"
+    PACK_STAMP="$(cat "$PSO/batches/$A"/p*.stamp | shasum | cut -d' ' -f1)"
+    if [ ! -f "$PSO/$A/p00000.mtl4a" ] || [ "$(cat "$PSO/$A.stamp" 2>/dev/null)" != "$PACK_STAMP" ]; then
+      rm -rf "$PSO/$A" && mkdir -p "$PSO/$A"
+      echo "packing the pipeline archive for ${A}…"
+      xcrun -sdk iphoneos metal-pack "$PSO/batches/$A"/p*.mtl4a -o "$PSO/$A/p00000.mtl4a" >> work/pso_ios.log 2>&1 || { tail -5 work/pso_ios.log; exit 1; }
+      echo "$PACK_STAMP" > "$PSO/$A.stamp"
+    fi
+    echo "pipeline archive for $A: $(du -sh "$PSO/$A/p00000.mtl4a" | cut -f1)"
+  done
+fi
+
+PREPARED=work/prepared_ios.noindex/prepared
+if [ "$ROMFS" = 1 ]; then
+  ROMFS_STAMP="$(echo "$SOURCE $(stat -L -f %z base.nsp) $(stat -L -f %z dlc.nsp 2>/dev/null) ${NX_ASTC_QUALITY:-} ${NX_TEXTURE_BC1_BLOCK:-} ${NX_TEXTURE_FORMATS:-} 1" | shasum | cut -d' ' -f1)"
+  if [ ! -f "$PREPARED/romfs.bin" ] || [ "$(cat "$PREPARED/stamp" 2>/dev/null)" != "$ROMFS_STAMP" ]; then
+    echo "preparing the game data for iOS, BC textures to ASTC (log: work/prepare_ios.log)…"
+    ./target/release/nxhost --update "$UPDATE" --prepare > work/prepare_ios.log 2>&1 || { tail -20 work/prepare_ios.log; exit 1; }
+    grep '^\[prep\]' work/prepare_ios.log | grep -v ' files (' | tail -15
+    echo "$ROMFS_STAMP" > "$PREPARED/stamp"
+  fi
+  echo "prepared game data: $PREPARED ($(du -sh "$PREPARED" | cut -f1)). Copy the folder into the app's Files as 'prepared':"
+  for f in "$PREPARED"/romfs.bin "$PREPARED"/dlc-*.bin "$PREPARED"/main_id; do
+    [ -e "$f" ] || continue
+    echo "  xcrun devicectl device copy to --device <id> --domain-type appDataContainer --domain-identifier $BUNDLE_ID --source $f --destination Documents/prepared/$(basename "$f")"
+  done
 fi
 
 NX_MODULES_DIR="$PATCHED" IPHONEOS_DEPLOYMENT_TARGET=26.0 \
@@ -70,6 +124,13 @@ mkdir -p "$RES/modules" "$RES/shaders/heap-segments-v2"
 cp "$PATCHED"/*.layout work/v-upd/exefs/main.npdm "$RES/modules/"
 cp -c "$CACHE"/*.metallib "$CACHE"/index.tsv "$CACHE"/guest.tsv "$RES/shaders/heap-segments-v2/"
 cp "$LIST" "$RES/shaders/pipelines.tsv"
+if [ -n "$PSO_GPUS" ]; then
+  mkdir -p "$RES/shaders/heap-segments-v2/pso4"
+  for G in $(echo "$PSO_GPUS" | tr ',' ' '); do
+    A="applegpu_${G#applegpu_}"
+    cp -cR "$PSO/$A" "$RES/shaders/heap-segments-v2/pso4/$A"
+  done
+fi
 
 (cd ios && xcodegen generate --quiet)
 rm -rf target/ios-xcode/Build/Products
@@ -88,12 +149,12 @@ fi
 codesign --verify "$APP"
 echo "built: $APP ($(du -sh "$APP" | cut -f1))"
 
-if [ "$MODE" = "--ipa" ]; then
+if [ "$MODE" = "--ipa" ] || [ "$MODE" = "--signed-ipa" ]; then
   STAGE="$(mktemp -d)"
   mkdir "$STAGE/Payload"
   cp -cRp "$APP" "$STAGE/Payload/"
   mkdir -p build
-  IPA="$PWD/build/Mush8.ipa"
+  IPA="$PWD/build/Mush8${IPA_NAME:+-$IPA_NAME}.ipa"
   rm -f "$IPA"
   (cd "$STAGE" && zip -qry "$IPA" Payload)
   rm -rf "$STAGE"

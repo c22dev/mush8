@@ -489,7 +489,7 @@ impl Pads {
                 if let Some(pad) = &remote {
                     acc.remote(pad);
                 }
-                if key_slot == Some(i) {
+                if key_slot == Some(i) && !crate::gfx::keyboard::typing() {
                     acc.keyboard();
                 }
                 if touch_slot == Some(i) {

@@ -66,6 +66,15 @@ impl RomFs {
         Ok(Arc::new(Patched::new(self.storage.clone(), end, patches)))
     }
 
+    pub fn file_table(&self) -> (u64, Vec<u8>) {
+        (self.files_offset, self.files.clone())
+    }
+
+    pub fn set_entry(&self, table: &mut [u8], f: &File, offset: u64, size: u64) {
+        table[f.entry + 8..f.entry + 0x10].copy_from_slice(&(offset - self.data_offset).to_le_bytes());
+        table[f.entry + 0x10..f.entry + 0x18].copy_from_slice(&size.to_le_bytes());
+    }
+
     pub fn dirs(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.walk_dirs(0, String::new(), &mut out);

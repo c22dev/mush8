@@ -205,7 +205,7 @@ pub fn verify(original: &[u8], out: &Output) -> Result<Summary> {
     let tramp = out.tramp;
     let mut s = Summary { tested: 0, untested: Vec::new(), failures: Vec::new() };
 
-    for p in &out.patches {
+    for p in out.patches.iter().filter(|p| p.kind != Kind::Spin) {
         let words: Vec<u32> = (p.start..p.end)
             .map(|a| u32::from_le_bytes(original[a as usize..a as usize + 4].try_into().unwrap()))
             .collect();

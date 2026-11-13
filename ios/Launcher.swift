@@ -48,18 +48,23 @@ final class Settings: ObservableObject {
     @Published var lanPlayServer = ""
     @Published var nextendoPid: UInt64 = 0
     @Published var nextendoName = ""
+    @Published var nickname = ""
+    @Published var nicknameSource = "nextendo"
+    @Published var country = ""
     @Published var prewarm = true
     @Published var rumble = true
     @Published var rumbleMin = 0.45
     @Published var spatial = true
     @Published var backgroundCompile = true
     @Published var motion = false
+    @Published var touchscreen = true
     @Published var handheld = true
     @Published var phonePads = false
     @Published var browserPads = false
     @Published var fillScreen = true
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
+    @Published var textures = "auto"
     @Published var disabledMods: [String] = []
     var extra: [String: Any] = [:]
     private var autosave: AnyCancellable?
@@ -75,18 +80,23 @@ final class Settings: ObservableObject {
         lanPlayServer = json["lanplay_server"] as? String ?? ""
         nextendoPid = (json["nextendo_pid"] as? NSNumber)?.uint64Value ?? 0
         nextendoName = json["nextendo_name"] as? String ?? ""
+        nickname = json["nickname"] as? String ?? ""
+        nicknameSource = json["nickname_source"] as? String ?? nicknameSource
+        country = json["country"] as? String ?? ""
         prewarm = json["prewarm_pipelines"] as? Bool ?? true
         rumble = json["rumble"] as? Bool ?? true
         rumbleMin = json["rumble_min"] as? Double ?? 0.45
         spatial = json["spatial_audio"] as? Bool ?? true
         backgroundCompile = json["background_compile"] as? Bool ?? true
         motion = json["motion_controls"] as? Bool ?? false
+        touchscreen = json["touchscreen"] as? Bool ?? true
         handheld = json["handheld"] as? Bool ?? true
         phonePads = json["phone_pads"] as? Bool ?? false
         browserPads = json["browser_pads"] as? Bool ?? false
         fillScreen = json["aspect"] as? String != "16:9"
         hudAtEdges = json["hud"] as? String != "center"
         hudScale = json["hud_scale"] as? Double ?? 1.0
+        textures = json["textures"] as? String ?? "auto"
         disabledMods = json["disabled_mods"] as? [String] ?? []
     }
 
@@ -96,6 +106,11 @@ final class Settings: ObservableObject {
         json["lanplay_server"] = lanPlayServer
         json["nextendo_pid"] = NSNumber(value: nextendoPid)
         json["nextendo_name"] = nextendoName
+        json["nickname"] = nickname
+        json["nickname_source"] = nicknameSource
+        json["country"] = country
+        json["player_name"] = playerNickname(nextendo: network == "nextendo", source: nicknameSource, custom: nickname, nextendoName: nextendoName)
+        json["player_country"] = playerCountry(nextendo: network == "nextendo", country: country)
         json["nextendo_token"] = nil
         json["lan"] = nil
         json["extra_pads"] = nil
@@ -106,12 +121,14 @@ final class Settings: ObservableObject {
         json["background_compile"] = backgroundCompile
         json["motion"] = nil
         json["motion_controls"] = motion
+        json["touchscreen"] = touchscreen
         json["handheld"] = handheld
         json["phone_pads"] = phonePads
         json["browser_pads"] = browserPads
         json["aspect"] = fillScreen ? "fill" : "16:9"
         json["hud"] = hudAtEdges ? "edges" : "center"
         json["hud_scale"] = hudScale
+        json["textures"] = textures
         json["disabled_mods"] = disabledMods
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: configURL)
@@ -192,7 +209,8 @@ final class Files: ObservableObject {
     @Published var copying: String?
     @Published var error: String?
 
-    var ready: Bool { gameFiles.allSatisfy { $0.optional || present[$0.name] == true } }
+    var ready: Bool { prepared || gameFiles.allSatisfy { $0.optional || present[$0.name] == true } }
+    var prepared: Bool { FileManager.default.fileExists(atPath: docsURL.appendingPathComponent("prepared/romfs.bin").path) }
 
     func scan() {
         let fm = FileManager.default
@@ -253,12 +271,16 @@ struct LauncherView: View {
     @StateObject private var network = LocalNetwork()
     @State private var error: String?
     @State private var launching = false
+    @State private var shownRefusal: String?
     @State private var picking = false
     @State private var browsingMods = false
     @State private var inspectedMod: Mod?
     @State private var deletingMod: Mod?
     @State private var modActionError: String?
     @State private var mods: [Mod] = []
+    @State private var pickingMiis = false
+    @State private var miiCount = 0
+    @State private var miiError: String?
     @State private var memory = os_proc_available_memory()
     @Environment(\.scenePhase) private var phase
     let play: () -> Void
@@ -283,117 +305,51 @@ struct LauncherView: View {
             }
             .padding(24)
             .frame(maxWidth: .infinity)
-            Form {
-                if !files.ready { gameFilesSection }
-                Section {
-                    Picker("Mode", selection: $s.network) {
-                        Text("Off").tag("off")
-                        Text("LAN").tag("lan")
-                        Text("Online").tag("lanplay")
-                        Text("Wireless (nearby)").tag("wireless")
-                        Text("Nextendo").tag("nextendo")
-                    }
-                    if s.network == "nextendo" {
-                        NextendoSignIn(pid: $s.nextendoPid, name: $s.nextendoName)
-                    }
-                    if s.network == "lanplay" {
-                        TextField("Server (host:port)", text: $s.lanPlayServer)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    }
-                    if network.denied && usesLocalNetwork {
-                        Text("Local network access was denied : other players can't be reached")
-                            .font(.caption).foregroundStyle(.red)
-                        Button("Turn it on in Settings") {
-                            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-                        }.font(.caption)
-                    }
-                } header: {
-                    Text("Multiplayer")
-                } footer: {
-                    if let note = multiplayerNote { Text(note) }
-                }
-                Section {
-                    Toggle("Remote controllers", isOn: $s.phonePads)
-                    if s.phonePads {
-                        Toggle("Web controllers", isOn: $s.browserPads)
-                        if s.browserPads {
-                            LabeledContent("Address", value: lanIP().map { "http://\($0):2904" } ?? "no Wi-Fi")
-                                .textSelection(.enabled)
+            NavigationStack {
+                Form {
+                    if !files.ready { gameFilesSection }
+                    Section {
+                        NavigationLink { multiplayerPage } label: {
+                            CategoryLabel(title: "Multiplayer", icon: "person.2.fill", color: .green, value: modeName)
+                        }
+                        NavigationLink { modsPage } label: {
+                            CategoryLabel(title: "Mods", icon: "puzzlepiece.extension.fill", color: .orange,
+                                          value: mods.isEmpty ? nil : "\(mods.filter { !s.disabledMods.contains($0.id) }.count)/\(mods.count)")
+                        }
+                        NavigationLink { playerPage } label: {
+                            CategoryLabel(title: "Player", icon: "person.crop.circle.fill", color: .purple, value: playerName)
                         }
                     }
-                } footer: {
-                    Text(s.phonePads && s.browserPads
-                        ? "After you press Play, other phones on the same Wi-Fi can open this address in their browser and join as players. The IP can change"
-                        : "Nearby iPhones can join as players with \"Use as a controller\"")
-                }
-                modsSection
-                Section {
-                    Picker("Console mode", selection: $s.handheld) {
-                        Text("Docked (1080p)").tag(false)
-                        Text("Handheld (720p)").tag(true)
-                    }
-                    Picker("Screen", selection: $s.fillScreen) {
-                        Text("16:9").tag(false)
-                        Text("Fill screen").tag(true)
-                    }
-                    if s.fillScreen {
-                        Picker("HUD", selection: $s.hudAtEdges) {
-                            Text("Screen edges").tag(true)
-                            Text("Centered").tag(false)
+                    Section {
+                        NavigationLink { graphicsPage } label: {
+                            CategoryLabel(title: "Graphics", icon: "display", color: .blue, value: s.handheld ? "Handheld" : "Docked")
+                        }
+                        NavigationLink { controlsPage } label: {
+                            CategoryLabel(title: "Audio & Controls", icon: "gamecontroller.fill", color: .pink, value: nil)
                         }
                     }
-                    HStack {
-                        Text("HUD size")
-                        Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
-                        Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text("Graphics")
-                } footer: {
-                    Text("Handheld renders at 720p: lighter on the GPU and battery. Fill screen widens the race to the whole display")
-                }
-                Section {
-                    Toggle("Prewarm pipelines", isOn: $s.prewarm)
-                    Toggle("Background shader compiling", isOn: $s.backgroundCompile)
-                } footer: {
-                    Text("Builds the game's graphics pipelines in the background at startup")
-                }
-                Section {
-                    Toggle("Spatial audio", isOn: $s.spatial)
-                    Toggle("Vibration", isOn: $s.rumble)
-                    if s.rumble {
-                        HStack {
-                            Text("Rumble cutoff")
-                            Slider(value: $s.rumbleMin, in: 0...0.9, step: 0.05)
-                            Text("\(Int((s.rumbleMin * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
-                        }
-                    }
-                    Toggle("Motion controls", isOn: $s.motion)
-                } header: {
-                    Text("Audio & controls")
-                } footer: {
-                    Text("Controller rumble weaker than the cutoff stays off, which stops the constant buzz on Xbox and PlayStation controllers. The phone and Switch controllers are not affected")
-                }
-                Section {
-                    HStack {
-                        Text("Memory available")
-                        Spacer()
-                        VStack(alignment: .trailing) {
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory))
-                                .foregroundStyle(.secondary).monospacedDigit()
-                            if memory < 4 << 30 {
-                                Text("4 GB is recommended: close other apps").font(.caption).foregroundStyle(.orange)
-                            }
+                    Section {
+                        NavigationLink { devicePage } label: {
+                            CategoryLabel(title: "Device", icon: "iphone", color: memory < 7 << 29 ? .orange : .gray,
+                                          value: ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory))
                         }
                     }
                 }
-                if files.ready { gameFilesSection }
+                .scrollEdgeEffectStyle(.soft, for: .top)
+                .toolbar(.hidden, for: .navigationBar)
             }
             .frame(maxWidth: .infinity)
         }
         .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $picking, allowedContentTypes: [.data, .folder], allowsMultipleSelection: true) { result in
-            if case .success(let urls) = result { files.copy(urls) }
+        .fileImporter(isPresented: $picking, allowedContentTypes: pickingMiis ? [.data] : [.data, .folder], allowsMultipleSelection: true) { result in
+            guard case .success(let urls) = result else { return }
+            if pickingMiis {
+                miiError = nil
+                do { try importMiis(urls, into: docsURL) } catch { miiError = error.localizedDescription }
+                miiCount = installedMiiCount(in: docsURL)
+            } else {
+                files.copy(urls)
+            }
         }
         .fullScreenCover(isPresented: $browsingMods, onDismiss: { mods = installedMods(in: docsURL) }) {
             ModBrowserView(folder: docsURL) { name in
@@ -406,6 +362,7 @@ struct LauncherView: View {
         .onAppear {
             files.scan()
             mods = installedMods(in: docsURL)
+            miiCount = installedMiiCount(in: docsURL)
             if usesLocalNetwork { network.request() }
         }
         .onChange(of: s.network) { if usesLocalNetwork { network.request() } }
@@ -414,6 +371,7 @@ struct LauncherView: View {
             if p == .active {
                 files.scan()
                 mods = installedMods(in: docsURL)
+                miiCount = installedMiiCount(in: docsURL)
             }
         }
         .task {
@@ -424,29 +382,203 @@ struct LauncherView: View {
         }
     }
 
-    var modsSection: some View {
-        Section {
-            Button {
-                browsingMods = true
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "globe")
-                    Text("Browse GameBanana…").fontWeight(.medium)
+    var modeName: String {
+        switch s.network {
+        case "lan": return "LAN"
+        case "lanplay": return "Lan-Play"
+        case "wireless": return "Wireless"
+        case "nextendo": return "Nextendo"
+        default: return "Off"
+        }
+    }
+
+    var multiplayerPage: some View {
+        CategoryPage(title: "Multiplayer") {
+            Section {
+                Picker("Mode", selection: $s.network) {
+                    Text("Off").tag("off")
+                    Text("LAN").tag("lan")
+                    Text("Lan-Play").tag("lanplay")
+                    Text("Wireless (nearby)").tag("wireless")
+                    Text("Nextendo").tag("nextendo")
+                }
+                if s.network == "nextendo" {
+                    NextendoSignIn(pid: $s.nextendoPid, name: $s.nextendoName)
+                }
+                if s.network == "lanplay" {
+                    TextField("Server (host:port)", text: $s.lanPlayServer)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                }
+                if network.denied && usesLocalNetwork {
+                    Text("Local network access was denied : other players can't be reached")
+                        .font(.caption).foregroundStyle(.red)
+                    Button("Turn it on in Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+                    }.font(.caption)
+                }
+            } footer: {
+                if let note = multiplayerNote { Text(note) }
+            }
+            Section {
+                Toggle("Remote controllers", isOn: $s.phonePads)
+                if s.phonePads {
+                    Toggle("Web controllers", isOn: $s.browserPads)
+                    if s.browserPads {
+                        LabeledContent("Address", value: lanIP().map { "http://\($0):2904" } ?? "no Wi-Fi")
+                            .textSelection(.enabled)
+                    }
+                }
+            } footer: {
+                Text(s.phonePads && s.browserPads
+                    ? "Phones on the same Wi-Fi open this in a browser after Play"
+                    : "Nearby iPhones join with \"Use as a controller\"")
+            }
+        }
+    }
+
+    var modsPage: some View {
+        CategoryPage(title: "Mods") {
+            Section {
+                Button {
+                    browsingMods = true
+                } label: {
+                    Label("Browse GameBanana…", systemImage: "globe").fontWeight(.medium)
+                }
+                .disabled(files.copying != nil)
+            }
+            Section {
+                if mods.isEmpty {
+                    Text("No mods installed.").foregroundStyle(.secondary)
+                }
+                ForEach(mods) { mod in
+                    ModRow(mod: mod, disabled: $s.disabledMods, inspect: { inspectedMod = mod }, delete: { deletingMod = mod })
+                }
+            } header: {
+                ModsHeader(mods: mods, disabled: s.disabledMods)
+            } footer: {
+                Text("Swipe to delete, long press for files. Lower mods win conflicts. Code patches don't run on iOS")
+            }
+        }
+    }
+
+    var graphicsPage: some View {
+        CategoryPage(title: "Graphics") {
+            Section {
+                Picker("Console mode", selection: $s.handheld) {
+                    Text("Docked (1080p)").tag(false)
+                    Text("Handheld (720p)").tag(true)
+                }
+                Picker("Screen", selection: $s.fillScreen) {
+                    Text("16:9").tag(false)
+                    Text("Fill screen").tag(true)
+                }
+                if s.fillScreen {
+                    Picker("HUD", selection: $s.hudAtEdges) {
+                        Text("Screen edges").tag(true)
+                        Text("Centered").tag(false)
+                    }
+                }
+                HStack {
+                    Text("HUD size")
+                    Slider(value: $s.hudScale, in: 0.5...1.5, step: 0.05)
+                    Text("\(Int((s.hudScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
+                }
+            } footer: {
+                Text("Handheld is lighter on the GPU and battery")
+            }
+            Section {
+                Picker("Textures", selection: $s.textures) {
+                    Text("Auto").tag("auto")
+                    Text("Full").tag("0")
+                    Text("Low").tag("1")
+                    Text("Very low").tag("2")
+                    Text("Ultra low").tag("3")
+                }
+            } footer: {
+                Text("Lower uses less memory but looks blurrier. Auto is Low on 6 GB iPhones and Full otherwise")
+            }
+            Section {
+                Toggle("Prewarm pipelines", isOn: $s.prewarm)
+                Toggle("Background shader compiling", isOn: $s.backgroundCompile)
+            } footer: {
+                Text("Builds graphics pipelines at startup")
+            }
+        }
+    }
+
+    var controlsPage: some View {
+        CategoryPage(title: "Audio & Controls") {
+            Section {
+                Toggle("Spatial audio", isOn: $s.spatial)
+            }
+            Section {
+                Toggle("Vibration", isOn: $s.rumble)
+                if s.rumble {
+                    HStack {
+                        Text("Rumble cutoff")
+                        Slider(value: $s.rumbleMin, in: 0...0.9, step: 0.05)
+                        Text("\(Int((s.rumbleMin * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                if s.rumble { Text("Weaker rumble is ignored, which stops the buzz on Xbox and PlayStation controllers. Phone and Switch controllers aren't affected") }
+            }
+            Section {
+                Toggle("Motion controls", isOn: $s.motion)
+                Toggle("Touchscreen", isOn: $s.touchscreen)
+            } footer: {
+                Text("Turn off Touchscreen to stop taps on the race reaching the game")
+            }
+        }
+    }
+
+    var devicePage: some View {
+        CategoryPage(title: "Device") {
+            Section {
+                HStack {
+                    Text("Memory available")
                     Spacer()
-                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                    VStack(alignment: .trailing) {
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(memory), countStyle: .memory))
+                            .foregroundStyle(.secondary).monospacedDigit()
+                        if memory < 7 << 29 {
+                            Text("3.5 GB is recommended: close other apps").font(.caption).foregroundStyle(.orange)
+                        }
+                    }
                 }
             }
-            .disabled(files.copying != nil)
-            if mods.isEmpty {
-                Text("No mods installed.").foregroundStyle(.secondary)
+            gameFilesSection
+        }
+    }
+
+    var playerName: String? {
+        let name = playerNickname(nextendo: s.network == "nextendo", source: s.nicknameSource, custom: s.nickname, nextendoName: s.nextendoName)
+        return name.isEmpty ? nil : name
+    }
+
+    var playerPage: some View {
+        CategoryPage(title: "Player") {
+            Section {
+                PlayerIdentity(nextendo: s.network == "nextendo", nextendoName: s.nextendoName,
+                               nameSource: $s.nicknameSource, name: $s.nickname, country: $s.country)
+                Button("Import Miis…") {
+                    pickingMiis = true
+                    picking = true
+                }
+                    .disabled(files.copying != nil)
+                if miiCount > 0 {
+                    Button("Remove custom Miis", role: .destructive) {
+                        miiError = nil
+                        do { try removeMiis(in: docsURL) } catch { miiError = error.localizedDescription }
+                        miiCount = installedMiiCount(in: docsURL)
+                    }
+                }
+                if let miiError { Text(miiError).foregroundStyle(.red).font(.callout) }
+            } header: {
+                if miiCount > 0 { Text("\(miiCount) custom Mii\(miiCount == 1 ? "" : "s")") }
+            } footer: {
+                Text("Shown on your ghosts and online, 10 characters max. The country sets your Nextendo flag. Miis: a MiiDatabase.dat, .charinfo or .storedata")
             }
-            ForEach(mods) { mod in
-                ModRow(mod: mod, disabled: $s.disabledMods, inspect: { inspectedMod = mod }, delete: { deletingMod = mod })
-            }
-        } header: {
-            ModsHeader(mods: mods, disabled: s.disabledMods)
-        } footer: {
-            Text("Swipe to delete; long press for files. Lower mods win conflicts. RomFS loads on Play; code patches don't run on iOS.")
         }
     }
 
@@ -462,7 +594,13 @@ struct LauncherView: View {
 
     var gameFilesSection: some View {
         Section("Game files") {
-            ForEach(gameFiles) { f in
+            if files.prepared {
+                HStack {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text("Prepared game data")
+                }
+            }
+            ForEach(gameFiles.filter { !files.prepared || !$0.name.hasSuffix(".nsp") || files.present[$0.name] == true }) { f in
                 HStack {
                     Image(systemName: files.present[f.name] == true ? "checkmark.circle.fill" : (f.optional ? "minus.circle" : "xmark.circle.fill"))
                         .foregroundStyle(files.present[f.name] == true ? .green : (f.optional ? .secondary : .red))
@@ -480,7 +618,10 @@ struct LauncherView: View {
                 ProgressView()
                 Text("Copying \(name)…").font(.callout)
             } else {
-                Button("Import game files") { picking = true }
+                Button("Import game files") {
+                    pickingMiis = false
+                    picking = true
+                }
                     .controlSize(.large)
                     .buttonStyle(.borderedProminent)
                 Text("Import prod.keys, the base game and update .nsp files and the Firmware folder (+DLC)/put them in On My iPhone")
@@ -492,7 +633,9 @@ struct LauncherView: View {
 
     @ViewBuilder var playButton: some View {
         let button = Button(action: start) {
-            Text("Play").font(.title3.weight(.semibold)).frame(maxWidth: 220)
+            Text("Play").font(.title3.weight(.semibold)).opacity(launching ? 0 : 1)
+                .overlay { if launching { ProgressView().tint(.white) } }
+                .frame(maxWidth: 220)
         }
         .controlSize(.large)
         #if compiler(>=6.2)
@@ -515,7 +658,7 @@ struct LauncherView: View {
         case "wireless":
             return "Nearby Mush8 clients can join (keep Wi-Fi on)"
         case "nextendo":
-            return "Mario Kart 8 Deluxe online on Nextendo Network servers, with Switch players. Needs a Nextendo account and update 4.0.1"
+            return "Online with Switch players. Needs a Nextendo account and update 4.0.1"
         default:
             return nil
         }
@@ -551,13 +694,118 @@ struct LauncherView: View {
                 let login = try await Nextendo.gameLogin()
                 s.nextendoPid = login.pid
                 s.nextendoName = login.name
+                if s.country.isEmpty && !login.country.isEmpty { s.country = login.country }
+                await Nextendo.syncMii(folder: docsURL, login: login)
                 try? s.save()
                 setenv("NX_NEXTENDO_TOKEN", login.token, 1)
+                setenv("NX_NEXTENDO_ACCESS", login.access, 1)
+                let gate = await Nextendo.onlineGate(login.token)
+                setenv("NX_NEXTENDO_GATE", gate.log, 1)
+                let refusal = gate.problem.map { "\(login.pid) \($0)" }
+                if let problem = gate.problem, shownRefusal != refusal {
+                    shownRefusal = refusal
+                    self.error = problem + " Tap Play again to start anyway: online play won't work until then."
+                    return
+                }
+                shownRefusal = nil
                 network.stop()
                 play()
             } catch {
                 self.error = error.localizedDescription
             }
+        }
+    }
+}
+
+struct CategoryPage<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: Content
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        Form { content }
+            .scrollEdgeEffectStyle(.soft, for: .top)
+            .safeAreaInset(edge: .top, spacing: 0) { header }
+            .toolbar(.hidden, for: .navigationBar)
+            .background(SwipeBackEnabler())
+    }
+
+    var header: some View {
+        ZStack {
+            Text(title).font(.headline)
+            HStack {
+                Button { dismiss() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 36, height: 36)
+                        .glassEffect(.regular.interactive(), in: .circle)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("Back"))
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 6)
+    }
+}
+
+private struct SwipeBackEnabler: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) {}
+
+    final class Controller: UIViewController, UIGestureRecognizerDelegate {
+        private var previous: [(UIGestureRecognizer, UIGestureRecognizerDelegate?)] = []
+
+        var gestures: [UIGestureRecognizer] {
+            [navigationController?.interactivePopGestureRecognizer, navigationController?.interactiveContentPopGestureRecognizer].compactMap { $0 }
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            for pop in gestures where pop.delegate !== self {
+                previous.append((pop, pop.delegate))
+                pop.delegate = self
+                pop.isEnabled = true
+            }
+        }
+
+        override func viewWillDisappear(_ animated: Bool) {
+            super.viewWillDisappear(animated)
+            for (pop, delegate) in previous where pop.delegate === self { pop.delegate = delegate }
+            previous = []
+        }
+
+        func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+            (navigationController?.viewControllers.count ?? 0) > 1
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            sequence(first: touch.view, next: { $0?.superview }).allSatisfy { !($0 is UISlider) }
+        }
+    }
+}
+
+struct CategoryLabel: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let value: String?
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                .background(color.gradient, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Text(title)
+            Spacer()
+            if let value { Text(value).foregroundStyle(.secondary) }
         }
     }
 }
@@ -583,6 +831,22 @@ public func mush8ShowLauncher(_ viewController: UnsafeMutableRawPointer, _ play:
     door.host = host
     host.modalPresentationStyle = .fullScreen
     parent.present(host, animated: false)
+}
+
+private final class AccessBox: @unchecked Sendable {
+    var value: String?
+}
+
+@_cdecl("mush8_nextendo_access")
+public func mush8NextendoAccess() -> UnsafeMutablePointer<CChar>? {
+    let done = DispatchSemaphore(value: 0)
+    let box = AccessBox()
+    Task.detached {
+        box.value = try? await Nextendo.freshAccess()
+        done.signal()
+    }
+    guard done.wait(timeout: .now() + 30) == .success, let access = box.value, !access.isEmpty else { return nil }
+    return strdup(access)
 }
 
 @_cdecl("mush8_each_mod")

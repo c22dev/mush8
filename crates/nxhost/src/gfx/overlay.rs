@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
-pub use ui::set_game_window;
+pub use ui::{game_window, set_game_window};
 
 fn on_main(f: impl FnOnce(MainThreadMarker) + Send + 'static) {
     dispatch2::DispatchQueue::main().exec_async(move || f(MainThreadMarker::new().expect("main queue runs on the main thread")));
@@ -138,6 +138,10 @@ mod ui {
 
     pub fn available() -> bool {
         WINDOW.load(Relaxed) != 0
+    }
+
+    pub fn game_window() -> usize {
+        WINDOW.load(Relaxed)
     }
 
     struct CardView {

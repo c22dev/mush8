@@ -47,6 +47,14 @@ pub(super) fn panel_hosts() -> Vec<(Retained<UIView>, bool)> {
     })
 }
 
+pub(super) fn presenter() -> Option<Retained<UIViewController>> {
+    let mut vc = UI.with(|ui| ui.borrow().as_ref().and_then(|ui| ui.window.rootViewController()))?;
+    while let Some(next) = vc.presentedViewController() {
+        vc = next;
+    }
+    Some(vc)
+}
+
 pub(super) static CONTROLLER_MODE: AtomicBool = AtomicBool::new(false);
 pub(super) static TV: AtomicBool = AtomicBool::new(false);
 static WAITING: AtomicBool = AtomicBool::new(false);

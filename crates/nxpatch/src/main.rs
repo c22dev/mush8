@@ -5,6 +5,7 @@ mod classify;
 mod equiv;
 mod ips;
 mod rewrite;
+mod spin;
 
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
@@ -48,6 +49,7 @@ enum Cmd {
         target: u64,
     },
     NvnUsage { nso: PathBuf },
+    Spins { nso: Vec<PathBuf> },
     Stamp {
         #[arg(long)]
         patch: Vec<PathBuf>,
@@ -174,6 +176,24 @@ fn main() -> Result<()> {
             std::fs::write(out.join("nxpatch.stamp"), stamp(&[patch, module].concat())?)?;
         }
         Cmd::Stamp { patch, module } => println!("{}", stamp(&[patch, module].concat())?),
+        Cmd::Spins { nso } => {
+            for p in nso {
+                let m = nxfs::nso::Nso::parse(&std::fs::read(&p)?)?;
+                let o = rewrite::rewrite(&m)?;
+                let spins: Vec<_> = o.patches.iter().filter(|x| x.kind == rewrite::Kind::Spin).collect();
+                println!("== {}: {} spin loops", p.display(), spins.len());
+                let cs = classify::capstone()?;
+                let text = m.text_bytes();
+                for s in spins {
+                    let w = u32::from_le_bytes(text[s.start as usize..][..4].try_into()?);
+                    let head = if asm::is_b(w) { asm::branch_target(w, s.start) } else { asm::cond_target(w, s.start) };
+                    println!("{head:#x}..{:#x}", s.end);
+                    for i in cs.disasm_all(&text[head as usize..s.end as usize], head)?.iter() {
+                        println!("    {:#x}  {} {}", i.address(), i.mnemonic().unwrap_or(""), i.op_str().unwrap_or(""));
+                    }
+                }
+            }
+        }
         Cmd::Verify { nso, from, limit } => {
             let mut failed = false;
             for p in nso {
