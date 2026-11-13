@@ -443,6 +443,13 @@ impl Textures {
     }
 }
 
+// The game relies on negative biases (-1 to -2.5) to keep its nearest-mip samplers sharp. Metal ignores
+// MTLSamplerDescriptor.lodBias on Apple7 GPUs (M1), so the fragment shaders add this value themselves.
+pub fn lod_bias(b: &[u8; 0x60]) -> f32 {
+    let bias = f32_at(b, 0x24);
+    if bias.is_finite() { bias.clamp(-16.0, 15.99) } else { 0.0 }
+}
+
 pub fn kind_type(kind: TexKind) -> MTLTextureType {
     match kind {
         TexKind::T2D | TexKind::Depth2D => MTLTextureType::Type2D,
@@ -729,10 +736,6 @@ fn make_sampler(b: Option<&[u8; 0x60]>, enhance: bool) -> objc2::rc::Retained<Sa
         } else {
             MTLSamplerBorderColor::TransparentBlack
         });
-        let bias = f32_at(b, 0x24);
-        if bias.is_finite() && bias != 0.0 && objc2::runtime::NSObjectProtocol::respondsToSelector(&*d, objc2::sel!(setLodBias:)) {
-            d.setLodBias(bias.clamp(-16.0, 15.99));
-        }
         let aniso = f32_at(b, 0x40);
         let mut aniso = if aniso.is_finite() { (aniso as usize).clamp(1, *MAX_ANISO) } else { 1 };
         if mipmapped && linear && !compare {
