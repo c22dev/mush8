@@ -72,8 +72,12 @@ impl Replay<'_> {
 
         self.heap = gfx::heap();
         let mut bound = Vec::new();
+        let mut lod_bias = [0.0; 32];
         for (stage, c) in [(0usize, &vsc), (1, &fsc)] {
-            for (b, tex, slot, sampler) in self.stage_textures(&st, stage, c) {
+            for (b, tex, slot, sampler, bias) in self.stage_textures(&st, stage, c) {
+                if stage == 1 && (b as usize) < lod_bias.len() {
+                    lod_bias[b as usize] = bias;
+                }
                 bound.push((stage == 1, b, tex, slot, sampler));
             }
         }
@@ -81,6 +85,7 @@ impl Replay<'_> {
         let flags = (!upper_left) as u32 | ((!ZERO_TO_ONE.load(Relaxed)) as u32) << 1;
         let alpha = st.color_state >> 24 & 0xF;
         let mut res = [self.res(&st, 0, vs.constants, flags), self.res(&st, 1, fs.constants, flags)];
+        res[1].lod_bias = lod_bias;
         if alpha != 0 && alpha != 8 {
             res[1].flags |= 4;
             res[1].alpha_func = alpha - 1;
@@ -167,7 +172,7 @@ impl Replay<'_> {
         Ok(())
     }
 
-    fn stage_textures(&mut self, st: &super::GState, stage: usize, c: &super::shaders::Compiled) -> Vec<(u32, gfx::Shared<gfx::Texture>, u32, gfx::Shared<super::textures::Sampler>)> {
+    fn stage_textures(&mut self, st: &super::GState, stage: usize, c: &super::shaders::Compiled) -> Vec<(u32, gfx::Shared<gfx::Texture>, u32, gfx::Shared<super::textures::Sampler>, f32)> {
         let mut bound = Vec::with_capacity(c.iface.textures.len());
         let ids = |b: u32| {
             let handle = st.textures[stage].get(b as usize).copied().unwrap_or(0);
@@ -207,7 +212,7 @@ impl Replay<'_> {
             };
             let sampler = self.e.textures.sampler(sb.as_ref());
             let slot = c.iface.samplers.get(&b).copied().unwrap_or(0);
-            bound.push((b, tex, slot, sampler));
+            bound.push((b, tex, slot, sampler, sb.as_ref().map_or(0.0, super::textures::lod_bias)));
         }
         bound
     }
@@ -252,7 +257,7 @@ impl Replay<'_> {
         }
         unsafe {
             enc.setBytes_length_atIndex(NonNull::from(&res).cast(), size_of::<Res>(), 0);
-            for (b, tex, slot, sampler) in &textures {
+            for (b, tex, slot, sampler, _) in &textures {
                 enc.setTexture_atIndex(Some(&tex.0), *b as usize);
                 enc.setSamplerState_atIndex(Some(&sampler.0), *slot as usize);
             }
@@ -284,6 +289,7 @@ impl Replay<'_> {
             heap_size: 0,
             heap_chunk_size: 0,
             zero_gpu: zeros,
+            lod_bias: [0.0; 32],
         };
         if let Some(h) = self.heap {
             if self.storage_touched[stage] != st.storage[stage] {
