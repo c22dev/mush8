@@ -882,13 +882,10 @@ struct ModsView: View {
                 }
             } header: {
                 ModsHeader(mods: mods, disabled: s.disabledMods)
+            } footer: {
+                Text("Drag to reorder. Lower mods win conflicts. Code patches apply on the next Prepare")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            // a List section footer stays on one line on macOS, so the explanation is a row of its own
-            Text("Drag a mod to change the order. Mods apply from top to bottom, so a lower mod wins when two mods change the same file. Code patches apply on the next Prepare")
-                .font(.caption).foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .listRowSeparator(.hidden)
-                .padding(.top, 4)
         } accessory: {
             Button("Show in Finder") { NSWorkspace.shared.open(s.folderURL.appendingPathComponent("mods")) }
                 .disabled(mods.isEmpty)
