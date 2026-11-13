@@ -65,6 +65,7 @@ final class Settings: ObservableObject {
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
     @Published var anisotropy = 0
+    @Published var lodBias = 0.0
     @Published var textureFilter = "game"
     @Published var dynamicResolution = true
     @Published var textures = "auto"
@@ -100,6 +101,7 @@ final class Settings: ObservableObject {
         hudAtEdges = json["hud"] as? String != "center"
         hudScale = json["hud_scale"] as? Double ?? 1.0
         anisotropy = json["anisotropy"] as? Int ?? 0
+        lodBias = json["lod_bias"] as? Double ?? 0.0
         textureFilter = json["texture_filter"] as? String ?? (json["trilinear"] as? Bool == true ? "trilinear" : "game")
         dynamicResolution = json["dynamic_resolution"] as? Bool ?? true
         textures = json["textures"] as? String ?? "auto"
@@ -135,6 +137,7 @@ final class Settings: ObservableObject {
         json["hud"] = hudAtEdges ? "edges" : "center"
         json["hud_scale"] = hudScale
         json["anisotropy"] = anisotropy
+        json["lod_bias"] = lodBias
         json["texture_filter"] = textureFilter
         json["trilinear"] = nil
         json["dynamic_resolution"] = dynamicResolution
@@ -528,6 +531,15 @@ struct LauncherView: View {
                 }
             } footer: {
                 Text("Trilinear blends texture detail levels, bilinear is a little faster")
+            }
+            Section {
+                HStack {
+                    Text("Texture LOD bias")
+                    Slider(value: $s.lodBias, in: -2...2, step: 0.25)
+                    Text(s.lodBias == 0 ? "0" : String(format: "%+.2f", s.lodBias)).monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+                }
+            } footer: {
+                Text("Below 0 shows sharper textures in the distance")
             }
             Section {
                 Toggle("Prewarm pipelines", isOn: $s.prewarm)

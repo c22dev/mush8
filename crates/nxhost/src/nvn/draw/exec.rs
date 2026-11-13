@@ -212,7 +212,8 @@ impl Replay<'_> {
             };
             let sampler = self.e.textures.sampler(sb.as_ref(), &tex.0);
             let slot = c.iface.samplers.get(&b).copied().unwrap_or(0);
-            bound.push((b, tex, slot, sampler, sb.as_ref().map_or(0.0, super::textures::lod_bias)));
+            let bias = sb.as_ref().map_or(0.0, |b| super::textures::lod_bias(b, &tex.0));
+            bound.push((b, tex, slot, sampler, bias));
         }
         bound
     }

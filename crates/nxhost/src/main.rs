@@ -312,6 +312,9 @@ fn apply_launcher_settings() {
     if let Some(aniso) = field("anisotropy").filter(|v| v.parse::<u32>().is_ok_and(|n| n > 1)) {
         unsafe { std::env::set_var("NX_ANISO", aniso) };
     }
+    if let Some(bias) = field("lod_bias").filter(|v| v.parse::<f32>().is_ok_and(|b| b != 0.0)) {
+        unsafe { std::env::set_var("NX_LOD_BIAS", bias) };
+    }
     if field("dynamic_resolution").as_deref() == Some("false") {
         unsafe { std::env::set_var("NX_DYNRES", "0") };
     }

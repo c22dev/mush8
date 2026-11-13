@@ -438,16 +438,27 @@ impl Textures {
         };
         let mut key = [0u8; 0x40];
         key.copy_from_slice(&b[8..0x48]);
-        let enhance = ENHANCE.on && tex.mipmapLevelCount() > 1 && !tex.usage().contains(MTLTextureUsage::RenderTarget);
+        let enhance = enhanced(tex);
         self.samplers.entry((key, enhance)).or_insert_with(|| Shared(make_sampler(Some(b), enhance))).clone()
     }
 }
 
 // The game relies on negative biases (-1 to -2.5) to keep its nearest-mip samplers sharp. Metal ignores
-// MTLSamplerDescriptor.lodBias on Apple7 GPUs (M1), so the fragment shaders add this value themselves.
-pub fn lod_bias(b: &[u8; 0x60]) -> f32 {
-    let bias = f32_at(b, 0x24);
-    if bias.is_finite() { bias.clamp(-16.0, 15.99) } else { 0.0 }
+// MTLSamplerDescriptor.lodBias on Apple7 GPUs (M1), so the fragment shaders add this value themselves,
+// with the user's LOD bias on mipmapped game textures.
+pub fn lod_bias(b: &[u8; 0x60], tex: &Texture) -> f32 {
+    let mut bias = f32_at(b, 0x24);
+    if !bias.is_finite() {
+        bias = 0.0;
+    }
+    if enhanced(tex) && matches!(u32_at(b, 8), 2..=5) {
+        bias += ENHANCE.lod_bias;
+    }
+    bias.clamp(-16.0, 15.99)
+}
+
+fn enhanced(tex: &Texture) -> bool {
+    ENHANCE.on && tex.mipmapLevelCount() > 1 && !tex.usage().contains(MTLTextureUsage::RenderTarget)
 }
 
 pub fn kind_type(kind: TexKind) -> MTLTextureType {
@@ -667,24 +678,26 @@ enum MipBlend {
 struct Enhance {
     on: bool,
     aniso: usize,
+    lod_bias: f32,
     mips: MipBlend,
 }
 
-const PLAIN: Enhance = Enhance { on: false, aniso: 0, mips: MipBlend::Game };
+const PLAIN: Enhance = Enhance { on: false, aniso: 0, lod_bias: 0.0, mips: MipBlend::Game };
 
 static ENHANCE: std::sync::LazyLock<Enhance> = std::sync::LazyLock::new(|| {
     let mut e = Enhance {
         on: false,
         aniso: std::env::var("NX_ANISO").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).min(16),
+        lod_bias: std::env::var("NX_LOD_BIAS").ok().and_then(|v| v.parse::<f32>().ok()).filter(|b| b.is_finite()).unwrap_or(0.0).clamp(-4.0, 4.0),
         mips: match std::env::var("NX_TEXTURE_FILTER").as_deref() {
             Ok("bilinear") => MipBlend::Bilinear,
             Ok("trilinear") => MipBlend::Trilinear,
             _ => MipBlend::Game,
         },
     };
-    e.on = e.aniso > 1 || e.mips != MipBlend::Game;
+    e.on = e.aniso > 1 || e.lod_bias != 0.0 || e.mips != MipBlend::Game;
     if e.on {
-        eprintln!("[gfx] samplers: anisotropy {}x, mip filter {:?}", e.aniso.max(1), e.mips);
+        eprintln!("[gfx] samplers: anisotropy {}x, LOD bias {:+}, mip filter {:?}", e.aniso.max(1), e.lod_bias, e.mips);
     }
     e
 });
