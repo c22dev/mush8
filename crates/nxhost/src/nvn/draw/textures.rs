@@ -6,7 +6,8 @@ use crate::gfx::{self, Shared};
 use nxshader::TexKind;
 use objc2_foundation::NSRange;
 use objc2_metal::*;
-use super::super::fx::FastMap;
+use super::super::fx::{FastMap, FastSet};
+use crate::gfx::memory;
 
 pub type Texture = gfx::Texture;
 pub type Sampler = objc2::runtime::ProtocolObject<dyn MTLSamplerState>;
@@ -55,11 +56,35 @@ pub fn is_compressed(nvn: u32) -> bool {
     (65..=80).contains(&nvn) || nvn >= 121
 }
 
+struct Entry {
+    tex: Shared<Texture>,
+    used: u64,
+    seen: u64,
+    skip: u32,
+}
+
+const TRIM_AGE: u64 = 50;
+const TRIM_FRAMES: u64 = 30;
+const TRIM_MIN_GAIN: usize = 32 << 20;
+const EMERGENCY_AGE: u64 = 10;
+const EMERGENCY_FRAMES: u64 = 2;
+const EMERGENCY_MIN_GAIN: usize = 16 << 20;
+
+fn now_tick() -> u64 {
+    static T0: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    T0.elapsed().as_millis() as u64 / 100
+}
+
 #[derive(Default)]
 pub struct Textures {
-    map: FastMap<TexKey, Shared<Texture>>,
+    map: FastMap<TexKey, Entry>,
+    pinned: FastSet<TexKey>,
+    created: u64,
+    tick: u64,
+    last_check: Option<std::time::Instant>,
+    last_log: Option<std::time::Instant>,
     block_views: Vec<(TexKey, Shared<Texture>)>,
-    aliases: FastMap<TexKey, Vec<Shared<Texture>>>,
+    aliases: FastMap<TexKey, Vec<(Shared<Texture>, Option<gfx::bc::Kind>)>>,
     storage: FastMap<TexKey, (u32, Shared<Texture>)>,
     views: FastMap<(TexKey, TexKind, [u32; 4]), Shared<Texture>>,
     dummies: FastMap<(TexKind, u8), Shared<Texture>>,
@@ -74,6 +99,7 @@ pub struct Textures {
 impl Textures {
     pub fn evict(&mut self, gone: &dyn Fn(&TexKey) -> bool) {
         self.map.retain(|k, _| !gone(k));
+        self.pinned.retain(|k| !gone(k));
         self.block_views.retain(|(k, _)| !gone(k));
         self.aliases.retain(|k, _| !gone(k));
         self.storage.retain(|k, _| !gone(k));
@@ -82,25 +108,34 @@ impl Textures {
     }
 
     pub fn cached(&self, key: &TexKey) -> Option<(TexKey, Shared<Texture>)> {
-        self.map.get(key).map(|t| (*key, t.clone()))
+        self.map.get(key).map(|e| (*key, e.tex.clone()))
     }
 
-    pub fn aliases_of(&self, key: &TexKey) -> &[Shared<Texture>] {
+    pub fn aliases_of(&self, key: &TexKey) -> &[(Shared<Texture>, Option<gfx::bc::Kind>)] {
         self.aliases.get(key).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn get(&mut self, b: &TexBuilder, render_target: bool) -> Option<(TexKey, Shared<Texture>)> {
-        self.get_keyed(TexKey::of(b), b, render_target)
+        self.lookup(TexKey::of(b), b, render_target, true)
     }
 
     pub fn get_keyed(&mut self, key: Option<TexKey>, b: &TexBuilder, render_target: bool) -> Option<(TexKey, Shared<Texture>)> {
+        self.lookup(key, b, render_target, false)
+    }
+
+    fn lookup(&mut self, key: Option<TexKey>, b: &TexBuilder, render_target: bool, exact: bool) -> Option<(TexKey, Shared<Texture>)> {
         let Some(key) = key else {
             self.miss("memory pool not found", b);
             return None;
         };
-        if let Some(t) = self.map.get(&key) {
-            let t = t.clone();
-            let frame = self.frame;
+        if exact && self.pinned.insert(key) && self.map.get(&key).is_some_and(|e| e.skip > 0) {
+            self.forget(&FastSet::from_iter([key]));
+        }
+        let (frame, tick) = (self.frame, self.tick);
+        if let Some(e) = self.map.get_mut(&key) {
+            e.used = tick;
+            e.seen = frame;
+            let (t, skip) = (e.tex.clone(), e.skip);
             if !render_target {
                 if let Some((mut hashes, checked, len)) = self.uploaded.get(&key).copied() {
                     if checked != frame {
@@ -108,7 +143,7 @@ impl Textures {
                         let changed = memory_hash(key.addr, len, w) != hashes[w];
                         if changed {
                             let levels = t.0.mipmapLevelCount() as u32;
-                            upload(b, &key, &t.0, levels);
+                            upload(b, &key, &t.0, levels, skip);
                             hashes = memory_hashes(key.addr, len);
                         }
                         self.uploaded.insert(key, (hashes, frame, len));
@@ -122,17 +157,19 @@ impl Textures {
             return None;
         };
         let base_key = TexKey { format: 0, ..key };
-        if is_compressed(key.format) && gfx::bc::soft(key.format).is_none() {
+        let soft = gfx::bc::soft(key.format).filter(|k| gpu_decodable(*k));
+        if is_compressed(key.format) && (gfx::bc::soft(key.format).is_none() || soft.is_some()) {
             if let Some((bk, base)) = self.block_views.iter().find(|(bk, _)| bk.addr == key.addr).map(|(k, t)| (*k, t.clone())) {
                 let (bw, bh, bpb) = super::super::format_info(key.format);
                 let (_, _, base_bpb) = super::super::format_info(bk.format);
                 if bpb == base_bpb && bk.width == key.width.div_ceil(bw) && bk.height == key.height.div_ceil(bh) {
-                    let alias = self.create(b, key, format, true)?;
+                    let (alias, _) = self.create(b, key, format, true)?;
                     let cb = gfx::gpu().queue.0.commandBuffer()?;
-                    copy_blocks(&cb, &base.0, &alias.0, None);
+                    refresh_alias(&cb, &base.0, &alias.0, soft, None);
                     cb.commit();
-                    self.aliases.entry(bk).or_default().push(alias.clone());
-                    self.map.insert(key, alias.clone());
+                    self.aliases.entry(bk).or_default().push((alias.clone(), soft));
+                    self.pinned.insert(key);
+                    self.map.insert(key, Entry { tex: alias.clone(), used: tick, seen: frame, skip: 0 });
                     return Some((key, alias));
                 }
             }
@@ -152,7 +189,7 @@ impl Textures {
                 };
                 if let Some(v) = v {
                     let v = Shared(v);
-                    self.map.insert(key, v.clone());
+                    self.map.insert(key, Entry { tex: v.clone(), used: tick, seen: frame, skip: 0 });
                     return Some((key, v));
                 }
             }
@@ -162,8 +199,8 @@ impl Textures {
             let near: Vec<_> = self.map.keys().filter(|k| k.addr == key.addr).collect();
             eprintln!("[gfx] sampled virtual-pool texture not rendered yet: {key:?} same-address keys {near:?}");
         }
-        let tex = self.create(b, key, format, render_target)?;
-        self.map.insert(key, tex.clone());
+        let (tex, skip) = self.create(b, key, format, render_target)?;
+        self.map.insert(key, Entry { tex: tex.clone(), used: self.tick, seen: self.frame, skip });
         self.storage.entry(TexKey { format: 0, ..key }).or_insert((key.format, tex.clone()));
         Some((key, tex))
     }
@@ -183,7 +220,17 @@ impl Textures {
         }
     }
 
-    fn create(&mut self, b: &TexBuilder, key: TexKey, format: MTLPixelFormat, render_target: bool) -> Option<Shared<Texture>> {
+    fn create(&mut self, b: &TexBuilder, key: TexKey, format: MTLPixelFormat, render_target: bool) -> Option<(Shared<Texture>, u32)> {
+        if !render_target {
+            self.created += 1;
+            if self.created % 8 == 0 && *memory::EMERGENCY > 0 {
+                self.tick = now_tick();
+                let left = memory::left();
+                if left < *memory::EMERGENCY {
+                    self.trim((EMERGENCY_AGE, EMERGENCY_FRAMES), EMERGENCY_MIN_GAIN, "emergency", left);
+                }
+            }
+        }
         let (ty, slices) = match key.target {
             2 => (MTLTextureType::Type3D, 1),
             3 => (MTLTextureType::Type2DArray, key.height),
@@ -197,12 +244,18 @@ impl Textures {
         let depth_format = gfx::is_depth_format(key.format);
         let max_levels = 32 - key.width.max(height).leading_zeros();
         let levels = key.levels.min(max_levels).max(1);
+        let skip = if !render_target && !depth_format && ty == MTLTextureType::Type2D && is_compressed(key.format) && !self.pinned.contains(&key) && super::super::texture_layout(b.as_ptr() as u64).is_some() {
+            memory::levels_to_skip(key.width, height, levels)
+        } else {
+            0
+        };
+        let levels = levels - skip;
         let d = MTLTextureDescriptor::new();
         unsafe {
             d.setTextureType(ty);
             d.setPixelFormat(format);
-            d.setWidth(key.width as usize);
-            d.setHeight(height as usize);
+            d.setWidth((key.width >> skip).max(1) as usize);
+            d.setHeight((height >> skip).max(1) as usize);
             d.setDepth(if key.target == 2 { key.depth as usize } else { 1 });
             d.setMipmapLevelCount(levels as usize);
             d.setArrayLength(slices.max(1) as usize);
@@ -210,21 +263,70 @@ impl Textures {
         let mut usage = MTLTextureUsage::ShaderRead;
         if !is_compressed(key.format) {
             usage |= MTLTextureUsage::RenderTarget | MTLTextureUsage::PixelFormatView;
+        } else if gfx::bc::soft(key.format).is_some_and(gpu_decodable) {
+            usage |= MTLTextureUsage::ShaderWrite | MTLTextureUsage::PixelFormatView;
         }
         d.setUsage(usage);
         d.setStorageMode(MTLStorageMode::Private);
         let tex = Shared(gfx::gpu().device.0.newTextureWithDescriptor(&d)?);
         if !render_target && !depth_format {
-            upload(b, &key, &tex.0, levels);
+            upload(b, &key, &tex.0, levels, skip);
         }
         let len = storage_len(b, &key);
-        if !render_target && !depth_format && cpu_writable(b) && len > 0 && gfx::heap().is_some_and(|h| h.gpu_addr(key.addr).is_some() && h.gpu_addr(key.addr + len - 1).is_some()) {
+        if !render_target && !depth_format && cpu_writable(b) && len > 0 && gfx::heap().is_some_and(|h| h.contains(key.addr, len)) {
             self.uploaded.insert(key, (memory_hashes(key.addr, len), self.frame, len));
         }
         if render_target && super::super::gfx_integer_block_format(key.format) {
             self.block_views.push((key, tex.clone()));
         }
-        Some(tex)
+        Some((tex, skip))
+    }
+
+    fn forget(&mut self, keys: &FastSet<TexKey>) {
+        self.map.retain(|k, _| !keys.contains(k));
+        self.views.retain(|(k, _, _), _| !keys.contains(k));
+        self.uploaded.retain(|k, _| !keys.contains(k));
+        self.storage.retain(|base, (format, _)| !keys.contains(&TexKey { format: *format, ..*base }));
+    }
+
+    fn trim(&mut self, (age, frames): (u64, u64), min_gain: usize, why: &str, left: u64) {
+        let (before, frame) = (self.tick.saturating_sub(age), self.frame.saturating_sub(frames));
+        let mut bytes = 0;
+        let dropped: FastSet<TexKey> = self
+            .map
+            .iter()
+            .filter(|(k, e)| e.used < before && e.seen < frame && is_compressed(k.format) && !self.pinned.contains(k))
+            .inspect(|(_, e)| bytes += MTLAllocation::allocatedSize(&*e.tex.0))
+            .map(|(k, _)| *k)
+            .collect();
+        if dropped.is_empty() || bytes < min_gain {
+            return;
+        }
+        self.forget(&dropped);
+        eprintln!("[mem] {why} trim: {} textures dropped ({} MB), {} MB left", dropped.len(), bytes >> 20, left >> 20);
+    }
+
+    pub fn maintain(&mut self) {
+        self.tick = now_tick();
+        let now = std::time::Instant::now();
+        if self.last_check.is_some_and(|t| now - t < std::time::Duration::from_millis(250)) {
+            return;
+        }
+        self.last_check = Some(now);
+        let left = memory::left();
+        if *memory::TRIM > 0 && left < *memory::TRIM {
+            self.trim((TRIM_AGE, TRIM_FRAMES), TRIM_MIN_GAIN, "low-memory", left);
+        }
+        if self.last_log.is_none_or(|t| now - t >= std::time::Duration::from_secs(10)) {
+            self.last_log = Some(now);
+            let bytes: usize = self.map.values().map(|e| MTLAllocation::allocatedSize(&*e.tex.0)).sum();
+            let left = match (left, memory::os_left()) {
+                (u64::MAX, _) => "no limit".to_string(),
+                (l, u64::MAX) => format!("{} MB left", l >> 20),
+                (l, os) => format!("{} MB left (iOS allows {} MB more)", l >> 20, os >> 20),
+            };
+            eprintln!("[mem] app uses {} MB, {left}, phone wired {} MB, {} textures ({} MB)", memory::footprint() >> 20, memory::wired() >> 20, self.map.len(), bytes >> 20);
+        }
     }
 
     pub fn view(&mut self, key: TexKey, b: &TexBuilder, tex: &Shared<Texture>, kind: TexKind) -> Option<Shared<Texture>> {
@@ -361,29 +463,39 @@ struct Piece {
     image: usize,
     size: (u32, u32, u32),
     sub: (u32, u32),
+    src: u32,
 }
 
-fn upload(b: &TexBuilder, key: &TexKey, tex: &Texture, levels: u32) {
+pub static UPLOAD_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn upload(b: &TexBuilder, key: &TexKey, tex: &Texture, levels: u32, skip: u32) {
+    let t0 = std::time::Instant::now();
+    upload_inner(b, key, tex, levels, skip);
+    UPLOAD_NS.fetch_add(t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn upload_inner(b: &TexBuilder, key: &TexKey, tex: &Texture, levels: u32, skip: u32) {
     let Some(heap) = gfx::heap() else { return };
     let (bw, bh, bpb) = super::super::format_info(key.format);
     let soft = gfx::bc::soft(key.format);
     let mut pieces = Vec::new();
     let mut total = 0usize;
-    let mut piece = |size: (u32, u32, u32), sub: (u32, u32), row: usize, rows: usize| {
-        pieces.push(Piece { offset: total, row, image: row * rows, size, sub });
+    let mut piece = |size: (u32, u32, u32), sub: (u32, u32), src: u32, row: usize, rows: usize| {
+        pieces.push(Piece { offset: total, row, image: row * rows, size, sub, src });
         total = (total + row * rows * size.2 as usize).next_multiple_of(16);
     };
     match super::super::texture_layout(b.as_ptr() as u64) {
         Some((shape, layout)) => {
-            if heap.gpu_addr(key.addr).is_none() || heap.gpu_addr(key.addr + layout.total_size - 1).is_none() || shape.width != key.width {
+            if !heap.contains(key.addr, layout.total_size) || shape.width != key.width {
                 return;
             }
-            let levels = levels.min(layout.level_offsets.len() as u32);
+            let levels = levels.min((layout.level_offsets.len() as u32).saturating_sub(skip));
             for layer in 0..shape.layers {
                 for level in 0..levels {
-                    let (w, h) = ((shape.width >> level).max(1), (shape.height >> level).max(1));
+                    let src = level + skip;
+                    let (w, h) = ((shape.width >> src).max(1), (shape.height >> src).max(1));
                     let (cols, rows) = (w.div_ceil(bw), h.div_ceil(bh));
-                    piece((w, h, (shape.depth >> level).max(1)), (level, layer), (cols * bpb) as usize, rows as usize);
+                    piece((w, h, (shape.depth >> src).max(1)), (level, layer), src, (cols * bpb) as usize, rows as usize);
                 }
             }
             let src = unsafe { std::slice::from_raw_parts(key.addr as *const u8, layout.total_size as usize) };
@@ -401,11 +513,11 @@ fn upload(b: &TexBuilder, key: &TexKey, tex: &Texture, levels: u32) {
             let stride = u32_at(b, 0x5c);
             let rows = key.height.div_ceil(bh);
             let row_bytes = key.width.div_ceil(bw) * bpb;
-            if stride < row_bytes || heap.gpu_addr(key.addr + (stride * rows) as u64 - 1).is_none() {
+            if stride < row_bytes || !heap.contains(key.addr, (stride * rows) as u64) {
                 return;
             }
             let src = unsafe { std::slice::from_raw_parts(key.addr as *const u8, (stride * rows) as usize) };
-            piece((key.width, key.height, 1), (0, 0), stride as usize, rows as usize);
+            piece((key.width, key.height, 1), (0, 0), 0, stride as usize, rows as usize);
             match soft {
                 None => stage_with(tex, total, &pieces, |dst| dst[..src.len()].copy_from_slice(src)),
                 Some(k) => decode_and_stage(tex, k, src.to_vec(), pieces),
@@ -428,7 +540,7 @@ fn untile_pieces(src: &[u8], layout: &super::super::tex::Layout, pieces: &[Piece
             }
         }
     }
-    let layer_of = |p: &Piece| p.sub.1 as u64 * layout.layer_size + layout.level_offsets[p.sub.0 as usize];
+    let layer_of = |p: &Piece| p.sub.1 as u64 * layout.layer_size + layout.level_offsets[p.src as usize];
     let base = dst.as_mut_ptr() as usize;
     let run = |(i, z, ys): &(usize, u32, std::ops::Range<u32>)| {
         let p = &pieces[*i];
@@ -436,7 +548,7 @@ fn untile_pieces(src: &[u8], layout: &super::super::tex::Layout, pieces: &[Piece
         let start = layer_of(p) as usize;
         let at = p.offset + *z as usize * p.image + ys.start as usize * p.row;
         let out = unsafe { std::slice::from_raw_parts_mut((base + at) as *mut u8, ys.len() * p.row) };
-        super::super::tex::untile_into(src.get(start..).unwrap_or(&[]), p.row as u32, rows, *z, layout.level_gobs[p.sub.0 as usize], ys.clone(), out);
+        super::super::tex::untile_into(src.get(start..).unwrap_or(&[]), p.row as u32, rows, *z, layout.level_gobs[p.src as usize], ys.clone(), out);
     };
     if dst.len() < 1 << 20 || jobs.len() < 4 {
         jobs.iter().for_each(run);
@@ -482,6 +594,18 @@ fn stage_with(tex: &Texture, total: usize, pieces: &[Piece], fill: impl FnOnce(&
         return;
     }
     let g = gfx::gpu();
+    let limit = if memory::os_left() < memory::TIGHT { STAGING_TIGHT } else { STAGING_MAX };
+    loop {
+        let oldest = {
+            let mut staging = STAGING.lock().unwrap();
+            staging.retain(|(cb, _)| !matches!(cb.0.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error));
+            if staging.is_empty() || staging.iter().map(|s| s.1).sum::<usize>() + total <= limit {
+                break;
+            }
+            staging.remove(0).0
+        };
+        crate::kernel::blocking(|| oldest.0.waitUntilCompleted());
+    }
     let Some(buf) = g.device.0.newBufferWithLength_options(total, MTLResourceOptions::StorageModeShared | MTLResourceOptions::CPUCacheModeWriteCombined) else { return };
     let dst = unsafe { std::slice::from_raw_parts_mut(buf.contents().as_ptr() as *mut u8, total) };
     fill(dst);
@@ -505,7 +629,12 @@ fn stage_with(tex: &Texture, total: usize, pieces: &[Piece], fill: impl FnOnce(&
     }
     enc.endEncoding();
     cb.commit();
+    STAGING.lock().unwrap().push((Shared(cb), total));
 }
+
+static STAGING: std::sync::Mutex<Vec<(Shared<gfx::CommandBuffer>, usize)>> = std::sync::Mutex::new(Vec::new());
+const STAGING_MAX: usize = 96 << 20;
+const STAGING_TIGHT: usize = 24 << 20;
 
 pub fn compare_fn(nvn: u32) -> MTLCompareFunction {
     use MTLCompareFunction as C;
@@ -553,6 +682,12 @@ static ENHANCE: std::sync::LazyLock<Enhance> = std::sync::LazyLock::new(|| {
         eprintln!("[gfx] samplers: anisotropy {}x, LOD bias {:+}, mip filter {:?}", e.aniso.max(1), e.lod_bias, e.mips);
     }
     e
+});
+
+static MAX_ANISO: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    let older_gpu = cfg!(target_os = "ios") && !gfx::gpu().device.0.supportsBCTextureCompression();
+    let default = if older_gpu { 4 } else { 16 };
+    std::env::var("NX_MAX_ANISO").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default).clamp(1, 16)
 });
 
 fn make_sampler(b: Option<&[u8; 0x60]>, enhance: bool) -> objc2::rc::Retained<Sampler> {
@@ -607,9 +742,9 @@ fn make_sampler(b: Option<&[u8; 0x60]>, enhance: bool) -> objc2::rc::Retained<Sa
             d.setLodBias(bias.clamp(-16.0, 15.99));
         }
         let aniso = f32_at(b, 0x40);
-        let mut aniso = if aniso.is_finite() { (aniso as usize).clamp(1, 16) } else { 1 };
+        let mut aniso = if aniso.is_finite() { (aniso as usize).clamp(1, *MAX_ANISO) } else { 1 };
         if mipmapped && linear && !compare {
-            aniso = aniso.max(fx.aniso);
+            aniso = aniso.max(fx.aniso).min(*MAX_ANISO);
         }
         d.setMaxAnisotropy(aniso);
     } else {
@@ -712,6 +847,125 @@ fn memory_hashes(addr: u64, len: u64) -> [u64; WINDOWS] {
         *h = memory_hash(addr, len, w);
     }
     hashes
+}
+
+pub fn gpu_decodable(k: gfx::bc::Kind) -> bool {
+    matches!(k, gfx::bc::Kind::Bc1 | gfx::bc::Kind::Bc3)
+}
+
+pub fn refresh_alias(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, soft: Option<gfx::bc::Kind>, only: Option<(u32, u32)>) {
+    match soft {
+        Some(k) => decode_blocks(cb, src, dst, k, only),
+        None => copy_blocks(cb, src, dst, only),
+    }
+}
+
+const BC_DECODE_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+static float3 rgb565(uint c) {
+    uint r = (c >> 11) & 31u, g = (c >> 5) & 63u, b = c & 31u;
+    return float3((r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2));
+}
+
+kernel void bc_decode(texture2d_array<uint, access::read> src [[texture(0)]],
+                      texture2d_array<float, access::write> dst [[texture(1)]],
+                      constant uint& bc3 [[buffer(0)]],
+                      uint3 gid [[thread_position_in_grid]]) {
+    if (gid.x >= src.get_width() || gid.y >= src.get_height()) return;
+    uint4 blk = src.read(gid.xy, gid.z);
+    uint2 color = bc3 != 0u ? blk.zw : blk.xy;
+    uint c0 = color.x & 0xFFFFu, c1 = color.x >> 16;
+    float3 p[4];
+    p[0] = rgb565(c0);
+    p[1] = rgb565(c1);
+    float pa[4] = {255.0, 255.0, 255.0, 255.0};
+    if (bc3 != 0u || c0 > c1) {
+        p[2] = round((2.0 * p[0] + p[1]) / 3.0);
+        p[3] = round((p[0] + 2.0 * p[1]) / 3.0);
+    } else {
+        p[2] = round((p[0] + p[1]) / 2.0);
+        p[3] = float3(0.0);
+        pa[3] = 0.0;
+    }
+    float a[8];
+    ulong abits = 0;
+    if (bc3 != 0u) {
+        a[0] = float(blk.x & 0xFFu);
+        a[1] = float((blk.x >> 8) & 0xFFu);
+        if (a[0] > a[1]) {
+            for (uint i = 1; i < 7; i++) a[i + 1] = round(((7.0 - i) * a[0] + i * a[1]) / 7.0);
+        } else {
+            for (uint i = 1; i < 5; i++) a[i + 1] = round(((5.0 - i) * a[0] + i * a[1]) / 5.0);
+            a[6] = 0.0;
+            a[7] = 255.0;
+        }
+        abits = ulong(blk.x >> 16) | (ulong(blk.y) << 16);
+    }
+    uint w = dst.get_width(), h = dst.get_height();
+    for (uint i = 0; i < 16; i++) {
+        uint2 px = gid.xy * 4u + uint2(i & 3u, i >> 2);
+        if (px.x >= w || px.y >= h) continue;
+        uint ci = (color.y >> (2u * i)) & 3u;
+        float alpha = bc3 != 0u ? a[uint(abits >> (3u * i)) & 7u] : pa[ci];
+        dst.write(float4(p[ci], alpha) / 255.0, px, gid.z);
+    }
+}
+"#;
+
+fn decode_pipeline() -> Option<Shared<ComputePipeline>> {
+    static P: std::sync::OnceLock<Option<Shared<ComputePipeline>>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let dev = &gfx::gpu().device.0;
+        let lib = dev.newLibraryWithSource_options_error(&objc2_foundation::NSString::from_str(BC_DECODE_MSL), None).inspect_err(|e| eprintln!("[gfx] bc decode kernel: {e:?}")).ok()?;
+        let f = lib.newFunctionWithName(&objc2_foundation::NSString::from_str("bc_decode"))?;
+        dev.newComputePipelineStateWithFunction_error(&f).ok().map(Shared)
+    })
+    .clone()
+}
+
+type ComputePipeline = objc2::runtime::ProtocolObject<dyn MTLComputePipelineState>;
+
+fn decode_blocks(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, k: gfx::bc::Kind, only: Option<(u32, u32)>) {
+    let Some(pipe) = decode_pipeline() else { return };
+    let cube = |t: &Texture| if matches!(t.textureType(), MTLTextureType::TypeCube | MTLTextureType::TypeCubeArray) { 6 } else { 1 };
+    let slices = (src.arrayLength() * cube(src)).min(dst.arrayLength() * cube(dst));
+    let levels = src.mipmapLevelCount().min(dst.mipmapLevelCount());
+    let raw = match dst.pixelFormat() {
+        MTLPixelFormat::RGBA8Unorm_sRGB => MTLPixelFormat::RGBA8Unorm,
+        f => f,
+    };
+    let Some(enc) = cb.computeCommandEncoder() else { return };
+    enc.setComputePipelineState(&pipe.0);
+    let bc3: u32 = (k == gfx::bc::Kind::Bc3) as u32;
+    for level in 0..levels {
+        if only.is_some_and(|(_, l)| l as usize != level) {
+            continue;
+        }
+        let (first, count) = match only {
+            Some((s, _)) if (s as usize) < slices => (s as usize, 1),
+            Some(_) => continue,
+            None => (0, slices),
+        };
+        let range = (NSRange { location: level, length: 1 }, NSRange { location: first, length: count });
+        let (Some(sv), Some(dv)) = (unsafe {
+            (
+                src.newTextureViewWithPixelFormat_textureType_levels_slices(src.pixelFormat(), MTLTextureType::Type2DArray, range.0, range.1),
+                dst.newTextureViewWithPixelFormat_textureType_levels_slices(raw, MTLTextureType::Type2DArray, range.0, range.1),
+            )
+        }) else {
+            continue;
+        };
+        unsafe {
+            enc.setTexture_atIndex(Some(&sv), 0);
+            enc.setTexture_atIndex(Some(&dv), 1);
+            enc.setBytes_length_atIndex(std::ptr::NonNull::from(&bc3).cast(), 4, 0);
+        }
+        let (bw, bh) = ((src.width() >> level).max(1), (src.height() >> level).max(1));
+        enc.dispatchThreads_threadsPerThreadgroup(MTLSize { width: bw, height: bh, depth: count }, MTLSize { width: 8, height: 8, depth: 1 });
+    }
+    enc.endEncoding();
 }
 
 pub fn copy_blocks(cb: &gfx::CommandBuffer, src: &Texture, dst: &Texture, only: Option<(u32, u32)>) {

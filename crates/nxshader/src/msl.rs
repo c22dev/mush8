@@ -1156,14 +1156,17 @@ impl<'a> Gen<'a> {
                     3 => TexKind::T2DArray,
                     4 => TexKind::T3D,
                     6 => TexKind::Cube,
+                    7 => TexKind::CubeArray,
                     _ => TexKind::T2D,
                 };
                 let b = self.tex(tid, kind);
-                let ra: Vec<i32> = (0..3).map(|k| if a == RZ_ { RZ_ } else { a + k }).collect();
+                let ra: Vec<i32> = (0..4).map(|k| if a == RZ_ { RZ_ } else { a + k }).collect();
                 let coords: Vec<i32> = if kind.is_array() { ra[1..].to_vec() } else { ra };
                 let c = self.coord(&coords, kind.coords());
 
-                self.line(format!("{{ float l = t{b}.calculate_clamped_lod(s{b}, {c}); float4 v = float4(l, l, 0.0f, 0.0f);"));
+                self.line(format!(
+                    "{{ int4 v = int4(int(t{b}.calculate_unclamped_lod(s{b}, {c}) * 256.0f), int(t{b}.calculate_clamped_lod(s{b}, {c}) * 256.0f), 0, 0);"
+                ));
                 let dests: Vec<i32> = (0..4).map(|k| if d == RZ_ { RZ_ } else { d + k }).collect();
                 self.write_components("v", mask, &dests);
                 self.line("}");

@@ -29,3 +29,4 @@ pub mod ctx {
 }
 
 pub const GUEST_TICK_HZ: u64 = 19_200_000;
+pub const SVC_SPIN: u32 = 0x1000;

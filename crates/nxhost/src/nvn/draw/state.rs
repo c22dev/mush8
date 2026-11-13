@@ -8,11 +8,11 @@ use objc2::rc::Retained;
 use objc2_foundation::{NSArray, NSString, NSURL};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 
 pub type Pipeline = objc2::runtime::ProtocolObject<dyn MTLRenderPipelineState>;
 
-use super::super::fx::{FastMap, FastSet};
+use super::super::fx::FastMap;
 pub type DepthState = objc2::runtime::ProtocolObject<dyn MTLDepthStencilState>;
 
 #[derive(Clone, Copy)]
@@ -131,7 +131,7 @@ mod segmented_heap_tests {
             std::env::remove_var("NX_GPU_HEAP_CHUNK_BYTES");
             assert!(mapped);
             let h = gfx::heap().unwrap();
-            assert_eq!(h.chunks.iter().map(|c| c.size).collect::<Vec<_>>(), vec![chunk as u64, chunk as u64, page as u64]);
+            assert_eq!(h.live().map(|c| c.size).collect::<Vec<_>>(), vec![chunk as u64, chunk as u64, page as u64]);
             assert!(h.buffer_range(h.base + chunk as u64 - 4, 8).is_none());
             assert!(h.buffer_range(h.base + (size - 4) as u64, 4).is_some());
             assert!(h.buffer_range(h.base + (size - 4) as u64, 8).is_none());
@@ -158,7 +158,7 @@ mod segmented_heap_tests {
             let cb = gfx::gpu().queue.0.commandBuffer().unwrap();
             let enc = cb.computeCommandEncoder().unwrap();
             enc.setComputePipelineState(&pipeline);
-            for chunk in &h.chunks {
+            for chunk in h.live() {
                 enc.useResource_usage(ProtocolObject::from_ref(&*chunk.buffer.0), MTLResourceUsage::Read | MTLResourceUsage::Write);
             }
             enc.useResource_usage(ProtocolObject::from_ref(&*gfx::gpu().zeros.0), MTLResourceUsage::Read);
@@ -184,7 +184,7 @@ pub struct Targets {
     pub stencil: bool,
 }
 
-fn blend_factor(f: u32) -> MTLBlendFactor {
+pub(super) fn blend_factor(f: u32) -> MTLBlendFactor {
     use MTLBlendFactor as B;
     match f {
         1 => B::Zero,
@@ -210,7 +210,7 @@ fn blend_factor(f: u32) -> MTLBlendFactor {
     }
 }
 
-fn blend_op(e: u32) -> MTLBlendOperation {
+pub(super) fn blend_op(e: u32) -> MTLBlendOperation {
     match e {
         2 => MTLBlendOperation::Subtract,
         3 => MTLBlendOperation::ReverseSubtract,
@@ -268,12 +268,72 @@ impl Hash for PipeKey {
 #[derive(Default)]
 pub struct States {
     pipelines: FastMap<PipeKey, Option<Shared<Pipeline>>>,
-    pending: FastSet<PipeKey>,
+    pending: super::shaders::Jobs<PipeKey>,
     depth: FastMap<(u64, [u32; 4], bool, bool), Shared<DepthState>>,
 }
 
 static DONE: LazyLock<Mutex<Vec<(PipeKey, Option<Shared<Pipeline>>)>>> = LazyLock::new(Default::default);
-static PREWARMED: LazyLock<Mutex<HashMap<Recorded, Shared<Pipeline>>>> = LazyLock::new(Default::default);
+enum Slot {
+    Building,
+    Ready(Shared<Pipeline>),
+    Claimed,
+}
+
+static PREWARMED: LazyLock<Mutex<HashMap<Recorded, Slot>>> = LazyLock::new(Default::default);
+static PREWARM_CHANGED: Condvar = Condvar::new();
+const PREWARM_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+struct Building<'a>(&'a Recorded);
+
+impl Drop for Building<'_> {
+    fn drop(&mut self) {
+        let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(m.get(self.0), Some(Slot::Building)) {
+            m.remove(self.0);
+            PREWARM_CHANGED.notify_all();
+        }
+    }
+}
+
+enum Claim {
+    Ready(Shared<Pipeline>, Option<std::time::Duration>),
+    Compiling,
+    Build,
+    Record,
+}
+
+fn claim(r: &Recorded, wait: bool, block: fn(&mut dyn FnMut())) -> Claim {
+    let mut waited = None;
+    let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        match m.get(r) {
+            Some(Slot::Ready(_)) => {
+                let Some(Slot::Ready(p)) = m.insert(r.clone(), Slot::Claimed) else { unreachable!() };
+                return Claim::Ready(p, waited.map(|t0: std::time::Instant| t0.elapsed()));
+            }
+            Some(Slot::Building) if !wait => return Claim::Compiling,
+            Some(Slot::Building) => {
+                let left = PREWARM_WAIT.saturating_sub(waited.get_or_insert_with(std::time::Instant::now).elapsed());
+                if left.is_zero() {
+                    m.insert(r.clone(), Slot::Claimed);
+                    return Claim::Build;
+                }
+                drop(m);
+                let mut woke = None;
+                block(&mut || {
+                    let m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+                    woke = Some(PREWARM_CHANGED.wait_timeout_while(m, left, |m| matches!(m.get(r), Some(Slot::Building))).unwrap_or_else(PoisonError::into_inner).0);
+                });
+                m = woke.unwrap_or_else(|| PREWARMED.lock().unwrap_or_else(PoisonError::into_inner));
+            }
+            Some(Slot::Claimed) => return Claim::Build,
+            None => {
+                m.insert(r.clone(), Slot::Claimed);
+                return Claim::Record;
+            }
+        }
+    }
+}
 
 impl States {
     pub fn pipeline(&mut self, vs: &Arc<Compiled>, vs_key: (u64, u32), fs: &Arc<Compiled>, fs_key: u64, t: &Targets, st: &GState, wait: bool) -> Result<Shared<Pipeline>, &'static str> {
@@ -289,12 +349,13 @@ impl States {
                 key.push(st.blend[i]);
             }
         }
+        let t0 = std::time::Instant::now();
+        let (cs, cm, blend) = (st.color_state, st.channel_mask, st.blend);
+        let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
+        let job = || pipeline_job(key, vs, fs, t, cs, cm, blend, name.clone());
         loop {
             if !self.pending.is_empty() {
-                for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
-                    self.pending.remove(&k);
-                    self.pipelines.insert(k, p);
-                }
+                self.drain();
             }
             if let Some(p) = self.pipelines.get(&key) {
                 return p.clone().ok_or("pipeline failed");
@@ -302,36 +363,63 @@ impl States {
             if !self.pending.contains(&key) {
                 break;
             }
-            if !wait {
+            if !wait || super::shaders::wait_over() {
+                return Err("pipeline compiling");
+            }
+            self.pending.spawn(key, true, job);
+            crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
+        if let Some(r) = Recorded::of(vs, fs, t, cs, cm, &blend) {
+            let wait = wait || super::shaders::sync_mode();
+            match claim(&r, wait, |f| crate::kernel::blocking(f)) {
+                Claim::Ready(p, waited) => {
+                    if let Some(elapsed) = waited.filter(|d| d.as_millis() >= 5) {
+                        eprintln!("[gfx] pipeline {:016x}/{fs_key:016x}: waited {} ms for prewarm", vs_key.0, elapsed.as_millis());
+                    }
+                    self.pipelines.insert(key, Some(p.clone()));
+                    return Ok(p);
+                }
+                Claim::Compiling => return Err("pipeline compiling"),
+                Claim::Build => {}
+                Claim::Record => record(r),
+            }
+        }
+        if let Some(p) = super::pso4::get().and_then(|p4| p4.pipeline(vs, fs, t, cs, cm, &blend, false)) {
+            self.pipelines.insert(key, Some(p.clone()));
+            return Ok(p);
+        }
+        if super::shaders::sync_mode() {
+            let p = crate::kernel::blocking(|| build_pipeline(vs, fs, t, cs, cm, &blend, &name));
+            self.pipelines.insert(key, p.clone());
+            return p.ok_or("pipeline failed");
+        }
+        self.pending.spawn(key, wait, job);
+        if !wait {
+            return Err("pipeline compiling");
+        }
+        loop {
+            self.drain();
+            if let Some(p) = self.pipelines.get(&key) {
+                if t0.elapsed().as_millis() >= 5 {
+                    eprintln!("[gfx] pipeline {name}: built while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
+                }
+                return p.clone().ok_or("pipeline failed");
+            }
+            if super::shaders::wait_over() {
+                if t0.elapsed().as_millis() >= 5 {
+                    eprintln!("[gfx] pipeline {name}: still building after {} ms, drawing without it for now", t0.elapsed().as_millis());
+                }
                 return Err("pipeline compiling");
             }
             crate::kernel::blocking(|| std::thread::sleep(std::time::Duration::from_millis(1)));
         }
-        let (cs, cm, blend) = (st.color_state, st.channel_mask, st.blend);
-        if let Some(r) = Recorded::of(vs, fs, t, cs, cm, &blend) {
-            if let Some(p) = PREWARMED.lock().unwrap().remove(&r) {
-                self.pipelines.insert(key, Some(p.clone()));
-                return Ok(p);
-            }
-            record(r);
+    }
+
+    fn drain(&mut self) {
+        for (k, p) in std::mem::take(&mut *DONE.lock().unwrap()) {
+            self.pending.remove(&k);
+            self.pipelines.entry(k).or_insert(p);
         }
-        let (jvs, jfs, jt) = (vs.clone(), fs.clone(), t.clone());
-        let name = format!("{:016x}/{fs_key:016x}", vs_key.0);
-        if wait || super::shaders::sync_mode() {
-            let t0 = std::time::Instant::now();
-            let p = crate::kernel::blocking(|| build_pipeline(&jvs, &jfs, &jt, cs, cm, &blend, &name));
-            if wait && !super::shaders::sync_mode() && t0.elapsed().as_millis() >= 5 {
-                eprintln!("[gfx] pipeline {name}: built while the render thread waited (new render target), {} ms", t0.elapsed().as_millis());
-            }
-            self.pipelines.insert(key, p.clone());
-            return p.ok_or("pipeline failed");
-        }
-        self.pending.insert(key);
-        super::shaders::spawn_job(Box::new(move || {
-            let p = build_pipeline(&jvs, &jfs, &jt, cs, cm, &blend, &name);
-            DONE.lock().unwrap().push((key, p));
-        }));
-        Err("pipeline compiling")
     }
 
     pub fn depth_stencil(&mut self, st: &GState, has_depth: bool, has_stencil: bool) -> Shared<DepthState> {
@@ -369,6 +457,15 @@ impl States {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pipeline_job(key: PipeKey, vs: &Arc<Compiled>, fs: &Arc<Compiled>, t: &Targets, cs: u32, cm: u32, blend: [u64; 8], name: String) -> Box<dyn FnOnce() + Send> {
+    let (vs, fs, t) = (vs.clone(), fs.clone(), t.clone());
+    Box::new(move || {
+        let p = build_pipeline(&vs, &fs, &t, cs, cm, &blend, &name);
+        DONE.lock().unwrap().push((key, p));
+    })
+}
+
 fn build_pipeline(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, channel_mask: u32, blend: &[u64; 8], name: &str) -> Option<Shared<Pipeline>> {
     let t0 = std::time::Instant::now();
     let r = build_pipeline_inner(vs, fs, t, color_state, channel_mask, blend, name);
@@ -380,6 +477,9 @@ fn build_pipeline(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, c
 }
 
 fn build_pipeline_inner(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, channel_mask: u32, blend: &[u64; 8], name: &str) -> Option<Shared<Pipeline>> {
+    if let Some(p) = super::pso4::get().and_then(|p4| p4.pipeline(vs, fs, t, color_state, channel_mask, blend, true)) {
+        return Some(p);
+    }
     let d = descriptor(&vs.func.0, &fs.func.0, t, color_state, channel_mask, blend);
     let dev = &gfx::gpu().device.0;
     if let Some(a) = &*ARCHIVES {
@@ -429,7 +529,9 @@ impl Arena {
         if self.used.last().is_none_or(|b| self.offset + size > b.0.length()) {
             let b = self.free.iter().position(|b| b.0.length() >= size).map(|i| self.free.swap_remove(i)).unwrap_or_else(|| {
                 let dev = &gfx::gpu().device.0;
-                Shared(dev.newBufferWithLength_options(size.max(CHUNK), MTLResourceOptions::StorageModeShared).expect("scratch buffer"))
+                let b = dev.newBufferWithLength_options(size.max(CHUNK), MTLResourceOptions::StorageModeShared).expect("scratch buffer");
+                gfx::make_resident(&b);
+                Shared(b)
             });
             self.used.push(b);
             self.offset = 0;
@@ -580,37 +682,115 @@ fn read_list() -> Vec<Recorded> {
         .collect()
 }
 
+#[derive(Default)]
+struct Warm {
+    started: bool,
+    finished: bool,
+    done: usize,
+    total: usize,
+}
+
+static WARM: Mutex<Warm> = Mutex::new(Warm { started: false, finished: false, done: 0, total: 0 });
+static WARM_CHANGED: Condvar = Condvar::new();
+
+fn warm_step(finished: bool) {
+    let mut w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+    if finished {
+        w.finished = true;
+    } else {
+        w.done += 1;
+    }
+    WARM_CHANGED.notify_all();
+}
+
 pub fn prewarm() {
+    {
+        let mut w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+        if w.started {
+            return;
+        }
+        w.started = true;
+    }
     std::thread::Builder::new()
         .name("prewarm".into())
         .spawn(|| {
             use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
             let t0 = std::time::Instant::now();
             let list = read_list();
+            WARM.lock().unwrap_or_else(PoisonError::into_inner).total = list.len();
+            let tc = std::time::Instant::now();
+            let kernels = super::shaders::warm_compute();
+            if kernels > 0 {
+                eprintln!("[gfx] prewarmed {kernels} compute shaders in {:.1} s", tc.elapsed().as_secs_f32());
+            }
             let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
+            let workers = std::env::var("NX_PREWARM_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get())).max(1);
             std::thread::scope(|s| {
-                for _ in 0..2 {
+                for _ in 0..workers {
                     s.spawn(|| {
-                        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0) };
+                        unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INITIATED, 0) };
+                        super::pso4::set_prewarming(true);
                         while let Some(r) = list.get(next.fetch_add(1, Relaxed)) {
+                            {
+                                let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+                                if m.contains_key(r) {
+                                    drop(m);
+                                    warm_step(false);
+                                    continue;
+                                }
+                                m.insert(r.clone(), Slot::Building);
+                            }
+                            let _building = Building(r);
                             objc2::rc::autoreleasepool(|_| {
                                 let (Some(vs), Some(fs)) = (super::shaders::aot_compiled(r.vs), super::shaders::aot_compiled(r.fs)) else { return };
-                                let d = descriptor(&vs.func.0, &fs.func.0, &r.targets(), r.color_state, r.channel_mask, &r.blend);
-                                if let Some(a) = &*ARCHIVES {
-                                    d.setBinaryArchives(Some(&a.0));
-                                }
-                                if let Ok(p) = gfx::gpu().device.0.newRenderPipelineStateWithDescriptor_error(&d) {
-                                    PREWARMED.lock().unwrap().insert(r.clone(), Shared(p));
+                                let name = format!("prewarm {:016x}/{:016x}", r.vs.0, r.fs.0);
+                                if let Some(p) = build_pipeline(&vs, &fs, &r.targets(), r.color_state, r.channel_mask, &r.blend, &name) {
+                                    let mut m = PREWARMED.lock().unwrap_or_else(PoisonError::into_inner);
+                                    if matches!(m.get(r), Some(Slot::Building)) {
+                                        m.insert(r.clone(), Slot::Ready(p));
+                                        PREWARM_CHANGED.notify_all();
+                                    }
                                     built.fetch_add(1, Relaxed);
                                 }
                             });
+                            warm_step(false);
                         }
                     });
                 }
             });
-            eprintln!("[gfx] prewarmed {}/{} recorded pipelines in {:.1} s", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
+            eprintln!("[gfx] prewarmed {}/{} recorded pipelines in {:.1} s on {workers} workers", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
+            if let Some(p4) = super::pso4::get() {
+                objc2::rc::autoreleasepool(|_| p4.prewarm_done());
+            }
+            warm_step(true);
         })
         .unwrap();
+}
+
+pub fn wait_prewarm() {
+    if std::env::var_os("NX_PREWARM_WAIT").is_some_and(|v| v == "0") {
+        return;
+    }
+    let t0 = std::time::Instant::now();
+    let mut shown = false;
+    crate::kernel::blocking(|| {
+        let mut w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+        while w.started && !w.finished {
+            w = WARM_CHANGED.wait_timeout(w, std::time::Duration::from_millis(50)).unwrap_or_else(PoisonError::into_inner).0;
+            let elapsed = t0.elapsed().as_secs_f32();
+            let frac = if w.total == 0 { 0.0 } else { w.done as f32 / w.total as f32 };
+            let left = if frac > 0.0 { elapsed / frac - elapsed } else { f32::MAX };
+            if !w.finished && elapsed >= 0.5 && (shown || left >= 0.3) {
+                drop(w);
+                shown = true;
+                objc2::rc::autoreleasepool(|_| gfx::show_progress(frac));
+                w = WARM.lock().unwrap_or_else(PoisonError::into_inner);
+            }
+        }
+    });
+    if shown || t0.elapsed().as_millis() >= 50 {
+        eprintln!("[gfx] first frame waited {:.1} s for the pipeline prewarm", t0.elapsed().as_secs_f32());
+    }
 }
 
 fn record(r: Recorded) {
@@ -631,22 +811,47 @@ fn add(archive: &Shared<Archive>, d: &MTLRenderPipelineDescriptor) -> bool {
     archive.0.addRenderPipelineFunctionsWithDescriptor_error(d).is_ok()
 }
 
-pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>) -> anyhow::Result<()> {
+type Variant = (u64, [u32; 3]);
+
+pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>, known_pairs: &[(Variant, Variant)]) -> anyhow::Result<()> {
     use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
     let t0 = std::time::Instant::now();
     let list = read_list();
-    if list.is_empty() {
-        eprintln!("[gfx] no recorded pipelines ({PIPELINE_LIST})");
-        return Ok(());
-    }
-    let archive = gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new()).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
-    let archive = Shared(archive);
     let function = |(key, [extra, uints, sints]): (u64, [u32; 3])| {
         let blob = programs.get(&key)?;
         super::shaders::compile(blob, false, extra, uints, sints, key)
     };
-    let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    if let Some(pre) = super::pso4::Prebuild::new() {
+        let mut pairs: Vec<(Variant, Variant)> = list.iter().map(|r| (r.vs, r.fs)).collect();
+        if std::env::var_os("NX_PREBUILD_PAIRS").is_none_or(|v| v != "0") {
+            pairs.extend_from_slice(known_pairs);
+        }
+        pairs.sort();
+        pairs.dedup();
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..threads {
+                s.spawn(|| loop {
+                    let Some(&(v, f)) = pairs.get(next.fetch_add(1, Relaxed)) else { return };
+                    objc2::rc::autoreleasepool(|_| {
+                        if let (Some(vs), Some(fs)) = (function(v), function(f)) {
+                            pre.add(&vs, &fs);
+                        }
+                    });
+                });
+            }
+        });
+        let (built, failed) = (pre.built.load(Relaxed), pre.failed.load(Relaxed));
+        objc2::rc::autoreleasepool(|_| pre.finish());
+        eprintln!("[gfx] prebuilt {built}/{} pipeline bases ({failed} failed) in {:.0} s", pairs.len(), t0.elapsed().as_secs_f32());
+    }
+    if std::env::var_os("NX_PIPELINE_ARCHIVE").is_none() || list.is_empty() {
+        return Ok(());
+    }
+    let archive = gfx::gpu().device.0.newBinaryArchiveWithDescriptor_error(&MTLBinaryArchiveDescriptor::new()).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
+    let archive = Shared(archive);
+    let (next, built) = (AtomicUsize::new(0), AtomicUsize::new(0));
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| loop {
@@ -665,6 +870,10 @@ pub fn precompile_pipelines(programs: &std::collections::BTreeMap<u64, Vec<u8>>)
     archive.0.serializeToURL_error(&NSURL::fileURLWithPath(&NSString::from_str(&path))).map_err(|e| anyhow::anyhow!("{}", e.localizedDescription()))?;
     eprintln!("[gfx] precompiled {}/{} recorded pipelines in {:.0} s", built.into_inner(), list.len(), t0.elapsed().as_secs_f32());
     Ok(())
+}
+
+pub fn recorded_pairs() -> Vec<(Variant, Variant)> {
+    read_list().iter().map(|r| (r.vs, r.fs)).collect()
 }
 
 pub fn recorded_variants() -> Vec<(u64, [u32; 3])> {
@@ -708,4 +917,49 @@ fn descriptor(vs: &Function, fs: &Function, t: &Targets, color_state: u32, chann
         }
     }
     d
+}
+
+#[cfg(test)]
+mod prewarm_tests {
+    use super::*;
+
+    fn key(n: u64) -> Recorded {
+        Recorded::parse(&format!("{n:x}:0:0:0\tfffffffffffffffe:0:0:0\t\t0\t0\t0\t0\t0,0,0,0,0,0,0,0")).unwrap()
+    }
+
+    #[test]
+    fn failed_build_releases_waiter() {
+        let r = key(0xffff_ffff_ffff_fff0);
+        PREWARMED.lock().unwrap().insert(r.clone(), Slot::Building);
+        let builder = r.clone();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            drop(Building(&builder));
+        });
+        let t0 = std::time::Instant::now();
+        assert!(matches!(claim(&r, true, |f| f()), Claim::Record));
+        assert!(t0.elapsed() < PREWARM_WAIT);
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Claimed)));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn slow_build_falls_back_to_render_thread() {
+        let r = key(0xffff_ffff_ffff_fff1);
+        PREWARMED.lock().unwrap().insert(r.clone(), Slot::Building);
+        let t0 = std::time::Instant::now();
+        assert!(matches!(claim(&r, true, |f| f()), Claim::Build));
+        assert!(t0.elapsed() >= PREWARM_WAIT);
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Claimed)));
+        drop(Building(&r));
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Claimed)));
+    }
+
+    #[test]
+    fn building_without_wait_reports_compiling() {
+        let r = key(0xffff_ffff_ffff_fff2);
+        PREWARMED.lock().unwrap().insert(r.clone(), Slot::Building);
+        assert!(matches!(claim(&r, false, |f| f()), Claim::Compiling));
+        assert!(matches!(PREWARMED.lock().unwrap().get(&r), Some(Slot::Building)));
+    }
 }

@@ -106,11 +106,12 @@ impl Replay<'_> {
         let heap = self.heap;
         let pass = self.pass.as_mut().unwrap();
         if let Some(hb) = heap {
-            if pass.heap != hb.chunks[0].gpu {
-                for chunk in &hb.chunks {
+            let v = hb.version();
+            if pass.heap != v {
+                for chunk in hb.live() {
                     pass.enc.useResource_usage_stages(ProtocolObject::from_ref(&*chunk.buffer.0), MTLResourceUsage::Read, MTLRenderStages::Vertex | MTLRenderStages::Fragment);
                 }
-                pass.heap = hb.chunks[0].gpu;
+                pass.heap = v;
             }
         }
 
@@ -223,8 +224,11 @@ impl Replay<'_> {
             super::shaders::Lookup::Pending => return Err("compute shader compiling"),
             super::shaders::Lookup::Failed => return Err("compute shader failed"),
         };
-        let pipeline = match self.e.kernels.get(&s.hash) {
-            Some(p) => p.clone(),
+        let pipeline = match self.e.kernels.get(&s.hash).cloned().or_else(|| super::shaders::warm_kernel(s.hash)) {
+            Some(p) => {
+                self.e.kernels.entry(s.hash).or_insert_with(|| p.clone());
+                p
+            }
             None => {
                 let p = gfx::gpu().device.0.newComputePipelineStateWithFunction_error(&c.func.0).map_err(|_| "compute pipeline failed")?;
                 let p = gfx::Shared(p);
@@ -237,12 +241,14 @@ impl Replay<'_> {
         let Some(enc) = self.cb.computeCommandEncoder() else { return Err("no compute encoder") };
         enc.setComputePipelineState(&pipeline.0);
         if let Some(h) = self.heap {
-            for chunk in &h.chunks {
+            for chunk in h.live() {
                 enc.useResource_usage(ProtocolObject::from_ref(&*chunk.buffer.0), MTLResourceUsage::Read | MTLResourceUsage::Write);
             }
         }
-        for b in &self.e.arena.used {
-            enc.useResource_usage(ProtocolObject::from_ref(&*b.0), MTLResourceUsage::Read);
+        if !gfx::residency() {
+            for b in &self.e.arena.used {
+                enc.useResource_usage(ProtocolObject::from_ref(&*b.0), MTLResourceUsage::Read);
+            }
         }
         unsafe {
             enc.setBytes_length_atIndex(NonNull::from(&res).cast(), size_of::<Res>(), 0);
@@ -280,6 +286,12 @@ impl Replay<'_> {
             zero_gpu: zeros,
         };
         if let Some(h) = self.heap {
+            if self.storage_touched[stage] != st.storage[stage] {
+                for &(addr, size) in &st.storage[stage] {
+                    h.touch(addr, size);
+                }
+                self.storage_touched[stage] = st.storage[stage];
+            }
             (r.heap_base, r.heap_gpu, r.heap_size, r.heap_chunk_size) = (h.base, h.gpu_addresses(), h.size, h.chunk_size);
         }
         if st.storage[stage].iter().any(|s| s.0 != 0) {
@@ -369,8 +381,8 @@ impl Replay<'_> {
             (Some((t, addr)), conv) => {
                 let size = index_size(t);
                 let heap = self.heap;
-                let range = heap.and_then(|h| h.buffer_range(addr, size * d.count as u64));
-                if let Some((chunk, off)) = range.filter(|_| conv.is_none() && t != 0 && addr % size == 0) {
+                let direct = conv.is_none() && t != 0 && addr % size == 0;
+                if let Some((chunk, off)) = heap.filter(|_| direct).and_then(|h| h.buffer_range(addr, size * d.count as u64)) {
                     let itype = if t == 1 { MTLIndexType::UInt16 } else { MTLIndexType::UInt32 };
                     return Ok(Prim::Indexed { ty, itype, buffer: chunk.buffer.clone(), offset: off, count: d.count as usize, base_vertex: d.base_vertex });
                 }

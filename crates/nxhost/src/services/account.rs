@@ -6,6 +6,8 @@ use crate::services::nextendo;
 use std::sync::Arc;
 
 const NICKNAME: &str = "Player";
+const NICKNAME_CHARS: usize = 10;
+const NAS_COUNTRY: usize = 0x20;
 
 pub struct Account;
 
@@ -13,8 +15,29 @@ fn profile_base(out: &mut Vec<u8>) {
     out.extend_from_slice(&USER_ID);
     out.extend_from_slice(&0u64.to_le_bytes());
     let mut n = [0u8; 0x20];
-    n[..NICKNAME.len()].copy_from_slice(NICKNAME.as_bytes());
+    let name = nickname();
+    n[..name.len()].copy_from_slice(name.as_bytes());
     out.extend_from_slice(&n);
+}
+
+pub(crate) fn nickname() -> String {
+    let set = std::env::var("NX_NICKNAME").unwrap_or_default();
+    let set = set.trim();
+    let name = if set.is_empty() { NICKNAME } else { set };
+    let mut out = String::new();
+    for c in name.chars().take(NICKNAME_CHARS) {
+        if out.len() + c.len_utf8() > 0x1F {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn country() -> Option<[u8; 2]> {
+    let c = std::env::var("NX_COUNTRY").ok()?.trim().to_ascii_uppercase();
+    let c: [u8; 2] = c.as_bytes().try_into().ok()?;
+    c.iter().all(u8::is_ascii_uppercase).then_some(c)
 }
 
 impl Service for Account {
@@ -102,6 +125,8 @@ fn async_done() -> Arc<dyn Service> {
 }
 
 fn linked(req: &Request, rsp: &mut Response) -> u32 {
+    let sizes = |bufs: &[crate::ipc::Buffer]| bufs.iter().map(|b| format!("{:#x}", b.size)).collect::<Vec<_>>().join(",");
+    nextendo::diag_once(&format!("acc{}", req.cmd), || format!("[acc] nextendo IManagerForApplication cmd {} (b [{}], c [{}])", req.cmd, sizes(&req.b), sizes(&req.c)));
     match req.cmd {
         0 | 160 => {}
         1 => rsp.push_u64(nextendo::pid()),
@@ -109,6 +134,11 @@ fn linked(req: &Request, rsp: &mut Response) -> u32 {
         3 | 4 => {
             let token = nextendo::id_token();
             let token = token.as_bytes();
+            let room = req.out_buffer().map_or(0, |b| b.size as usize);
+            nextendo::diag_once(&format!("token{}", req.cmd), || {
+                let fit = if room > token.len() { "fits with a NUL" } else if room == token.len() { "fits WITHOUT a NUL" } else { "TRUNCATED" };
+                format!("[acc] nextendo id token for cmd {}: {} bytes into a {room:#x}-byte buffer, {fit}", req.cmd, token.len())
+            });
             if let Some(b) = req.out_buffer() {
                 let mut out = vec![0u8; b.size as usize];
                 let n = token.len().min(out.len());
@@ -120,6 +150,9 @@ fn linked(req: &Request, rsp: &mut Response) -> u32 {
         130 => {
             let mut base = [0u8; 0x68];
             base[..10].copy_from_slice(b"2000-01-01");
+            if let Some(c) = country() {
+                base[NAS_COUNTRY..NAS_COUNTRY + 2].copy_from_slice(&c);
+            }
             if let Some(c) = req.c.iter().find(|b| b.addr != 0 && b.size >= 0x68) {
                 write_buffer(c, &base);
             }

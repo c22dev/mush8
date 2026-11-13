@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Default)]
 pub struct Keys(HashMap<String, Vec<u8>>);
 
 impl Keys {

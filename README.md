@@ -17,6 +17,8 @@ Because Nintendo ninjas are always watching, you will need your own dump :
 - a `Firmware` folder dumped from your Switch (fonts, Miis)
 - optionally, the Booster Course Pass, named `dlc.nsp`
 
+- optionally, your Miis : the `MiiDatabase.dat` from your Switch's system save `8000000000000030`, or single `.charinfo` (0x58 bytes) / `.storedata` (0x44 bytes) Mii files. Import them under Player in the launcher (they go in a `miis` folder next to your game files) and they show up next to the default Miis in the game
+
 Mush8 will then asks for them : on macOS pick the folder holding them in the launcher, on iOS import them from the app (or copy them in Files → On My iPhone → Mush8)
 
 ## Requirements
@@ -56,6 +58,8 @@ Or make an `.ipa` to install with AltStore / SideStore :
 ```
 it ends up in `build/Mush8.ipa`
 
+Add `--romfs` to prepare the game data on your Mac for iPhones below the 15 Pro : it rewrites the BC1, BC3 and BC7 textures as ASTC, so they don't get decoded on the CPU. Copy the `work/prepared_ios.noindex/prepared` folder to the app's files as `prepared`, the phone doesn't need the `.nsp` files with it
+
 Tests :
 ```
 cargo test --workspace
@@ -81,21 +85,27 @@ Pick a mode in the launcher, under Multiplayer :
 - LAN : players on the same network, a Switch can join too
 - Online : any lan-play.com server (`host:port`), Switches on that server included
 - Wireless : nearby Mush8 players
-- Nextendo : Mario Kart 8 Deluxe online on the [Nextendo Network](https://nextendo.network) servers, with Switch players using [Prelude-Nextendo](https://github.com/NextendoNetwork/Prelude-Nextendo). Sign in with your Nextendo account under Multiplayer (on nextendo.network, Mush8 never sees your password). Needs update 4.0.1. In this mode the game's own Online button and online ghost options come back, and Local Wireless becomes LAN
+- Nextendo : Mario Kart 8 Deluxe online on the [Nextendo Network](https://nextendo.network) servers, with Switch players using [Prelude-Nextendo](https://github.com/NextendoNetwork/Prelude-Nextendo). Sign in with your Nextendo account under Multiplayer (on nextendo.network, Mush8 never sees your password). Needs update 4.0.1. In this mode the game's own Online button and online ghost options come back, and Local Wireless becomes LAN. Your Nextendo friends show up in the game's Friends list so you can join their races, and they see you playing Mario Kart on nextendo.network and in the Nextendo app
 
 In Nextendo mode the game can only look up Nextendo's servers : every other name is blocked, and TLS is only accepted from Nextendo's addresses. Mush8 keeps your sign-in in the Keychain and sends its game token only to Nextendo. Online races are peer to peer, so other players see your IP address, and the game's code runs unsandboxed on your device, so only play with people you trust if you're worried about that
+
+## Profile
+Customize your player profile under the `Player` tab.
+- Player name : The name your profile. Will show up in lobbies and timetrial records. (Select `Nextendo` to sync with your nextendo profile).
+- Country : The country for your profile. Will show up as a country flag in lobbies and timetrial records.
+- Mii's : Allows you to upload your own mii database with custom mii's.
 
 ## Controls
 Any controller normally works (Switch Pro, Joy-Con, DualSense, Xbox...). On macOS the keyboard works too (WASD stick, arrows d-pad, X/Return A, Z/Backspace B, Q/E L/R, 1/3 ZL/ZR, Tab +), on iOS there are touch controls when no controller is connected
 
 An iPhone can be a controller too : open Mush8 on it and tap "Use as a controller". It finds the other Mush8 instance on the same Wi-Fi and joins as the next player
 
-Any browser can be a controller too : turn "Remote controller" and "Browser controllers" on in the launcher and the address shown on the other device
+Any browser can be a controller too : turn "Remote controllers" and "Web controllers" on under Multiplayer in the launcher and the address shown on the other device
 
 On macOS, if your controller or a part of it (for example rumble) does not work, set "Gamepad driver" to SDL in the launcher
 
 ## Mods
-Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Game data → Mods → Customize on macOS, or the launcher's Mods section on iOS. Mods load in name order; later mods win file conflicts.
+Mush8 loads mods from `mods` inside the selected game files folder on macOS, or the app's Documents folder on iOS. Open Mods in the launcher. Mods load in name order; later mods win file conflicts.
 
 Use Browse GameBanana to search Mario Kart 8 Deluxe mods by name, section, URL or ID, then choose a file to download and install. The app supports ZIP, 7z and RAR, displays download progress, and supports cancellation. Existing mods are not overwritten. Downloads are limited to 512 MiB and extraction to 2 GiB / 20,000 entries. The flow was informed by [SimpleModDownloader](https://github.com/PoloNX/SimpleModDownloader).
 
@@ -129,11 +139,12 @@ mods/
 ## Credits
 Thanks to everyone who contributed :
 - [codedpalette](https://github.com/codedpalette) : a bunch of fixes and improvements
-- [hchzr](https://github.com/hchzr) : 4K and 60 fps split screen
+- [hczr](https://github.com/hczr-dev) : 4K and 60 fps split screen
 - [lyccccy](https://github.com/lyccccy) : GPU heap split, so iPhones with less memory can render
 - [FritteHD](https://github.com/FritteHD) : browser phone pad
 - [justr4mzi](https://github.com/justr4mzi) : kernel signal, Mii and video decoder fixes
 - [184904](https://github.com/184904) : null index buffer fix
+- [iCosiSenpai](https://github.com/iCosiSenpai) : Nextendo online refusal reasons and NEX login trace
 
 Contributions are welcome !
 

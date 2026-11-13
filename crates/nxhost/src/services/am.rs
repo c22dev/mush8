@@ -217,6 +217,8 @@ impl Service for StorageAccessor {
 }
 
 const APPLET_CONTROLLER: u32 = 0x0C;
+const APPLET_SWKBD: u32 = 0x11;
+const APPLET_MII: u32 = 0x12;
 const APPLET_WEB: u32 = 0x13;
 const APPLET_OFFLINE_WEB: u32 = 0x17;
 
@@ -235,11 +237,24 @@ impl Service for LibraryAppletCreator {
                     id,
                     input: Mutex::new(Vec::new()),
                     output: Mutex::new(VecDeque::new()),
+                    interactive: Mutex::new(VecDeque::new()),
+                    swkbd: Mutex::new(None),
                     state_event: new_event(false),
                     out_event: new_event(false),
+                    interactive_event: new_event(false),
                 }));
             }
             10 => rsp.objects.push(Storage::new(vec![0; req.u64(0).min(1 << 20) as usize])),
+            11 => {
+                let mem = req.copy_handles.first().and_then(|&h| KERNEL.lock().get(h));
+                let data = match mem {
+                    Some(Obj::TransferMemory { addr, size }) if addr != 0 => {
+                        unsafe { std::slice::from_raw_parts(addr as *const u8, size.min(1 << 20) as usize) }.to_vec()
+                    }
+                    _ => vec![0; req.u64(8).min(1 << 20) as usize],
+                };
+                rsp.objects.push(Storage::new(data));
+            }
             _ => return Stub(self.name()).call(req, rsp),
         }
         0
@@ -250,8 +265,11 @@ struct LibraryApplet {
     id: u32,
     input: Mutex<Vec<Vec<u8>>>,
     output: Mutex<VecDeque<Vec<u8>>>,
+    interactive: Mutex<VecDeque<Vec<u8>>>,
+    swkbd: Mutex<Option<Swkbd>>,
     state_event: u32,
     out_event: u32,
+    interactive_event: u32,
 }
 
 fn signal(handle: u32) {
@@ -264,8 +282,14 @@ fn signal(handle: u32) {
 impl LibraryApplet {
     fn run(&self) {
         let input = self.input.lock().unwrap().clone();
+        if self.id == APPLET_SWKBD {
+            let kb = Swkbd::parse(&input);
+            self.keyboard(kb, None);
+            return;
+        }
         let out = match self.id {
             APPLET_CONTROLLER => Some(controller_applet(&input)),
+            APPLET_MII => Some(mii_applet(&input)),
             APPLET_WEB | APPLET_OFFLINE_WEB => Some(web_applet(&input)),
             APPLET_ERROR => {
                 for (i, d) in input.iter().enumerate() {
@@ -279,12 +303,154 @@ impl LibraryApplet {
                 None
             }
         };
+        self.finish(out);
+    }
+
+    fn finish(&self, out: Option<Vec<u8>>) {
         if let Some(o) = out {
             self.output.lock().unwrap().push_back(o);
             signal(self.out_event);
         }
         signal(self.state_event);
         COMMON.push(FOCUS_STATE_CHANGED);
+    }
+
+    fn keyboard(&self, kb: Swkbd, error: Option<String>) {
+        let text = kb.ask(error);
+        if kb.check && let Some(t) = &text {
+            self.interactive.lock().unwrap().push_back(kb.check_request(t));
+            *self.swkbd.lock().unwrap() = Some(Swkbd { last: t.clone(), ..kb });
+            signal(self.interactive_event);
+            return;
+        }
+        self.finish(Some(kb.output(text.as_deref())));
+    }
+
+    fn checked(&self, reply: &[u8]) {
+        let Some(kb) = self.swkbd.lock().unwrap().take() else { return };
+        let result = reply.get(..4).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
+        if result == SWKBD_CHECK_OK || result == SWKBD_CHECK_CONFIRM {
+            let last = kb.last.clone();
+            self.finish(Some(kb.output(Some(&last))));
+            return;
+        }
+        let msg = utf16(reply.get(4..).unwrap_or(&[]));
+        eprintln!("[am] keyboard: the game rejected {:?} ({result}): {msg:?}", kb.last);
+        let error = (result == SWKBD_CHECK_FAILURE && !msg.is_empty()).then_some(msg);
+        let kb = Swkbd { initial: kb.last.clone(), ..kb };
+        crate::kernel::blocking(|| self.keyboard(kb, error));
+    }
+}
+
+const SWKBD_CONFIG_SIZE: usize = 0x3D4;
+const SWKBD_OUTPUT_SIZE: usize = 0x7D8;
+const SWKBD_CHECK_SIZE: usize = 0x7D4;
+const SWKBD_CHECK_OK: u32 = 0;
+const SWKBD_CHECK_FAILURE: u32 = 1;
+const SWKBD_CHECK_CONFIRM: u32 = 2;
+const SWKBD_NUMERIC: u32 = 1;
+
+#[derive(Clone, Debug, Default)]
+struct Swkbd {
+    numeric: bool,
+    ok: String,
+    header: String,
+    sub: String,
+    guide: String,
+    max: usize,
+    min: usize,
+    password: bool,
+    utf8: bool,
+    check: bool,
+    initial: String,
+    last: String,
+}
+
+fn utf16(d: &[u8]) -> String {
+    let units: Vec<u16> = d.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&c| c != 0).collect();
+    String::from_utf16_lossy(&units).chars().filter(|c| !c.is_control()).collect()
+}
+
+impl Swkbd {
+    fn parse(input: &[Vec<u8>]) -> Swkbd {
+        let Some(c) = input.get(1).filter(|c| c.len() >= SWKBD_CONFIG_SIZE) else {
+            eprintln!("[am] keyboard: config of {} bytes is not a normal keyboard", input.get(1).map_or(0, |c| c.len()));
+            return Swkbd { max: 100, ok: "OK".into(), ..Default::default() };
+        };
+        let u32_at = |o: usize| u32::from_le_bytes(c[o..o + 4].try_into().unwrap());
+        let s = |o: usize, n: usize| utf16(&c[o..o + 2 * n]);
+        let mut kb = Swkbd {
+            numeric: u32_at(0) == SWKBD_NUMERIC,
+            ok: Some(s(0x4, 9)).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "OK".into()),
+            header: s(0x24, 65),
+            sub: s(0xA6, 129),
+            guide: s(0x1A8, 257),
+            max: u32_at(0x3AC) as usize,
+            min: u32_at(0x3B0) as usize,
+            password: u32_at(0x3B4) != 0,
+            utf8: c[0x3BD] != 0,
+            check: c[0x3D0] != 0,
+            ..Default::default()
+        };
+        if kb.max == 0 {
+            kb.max = 100;
+        }
+        let (off, len) = (u32_at(0x3C0) as usize, u32_at(0x3C4) as usize);
+        if let Some(w) = input.get(2).and_then(|w| w.get(off..off + 2 * len)) {
+            kb.initial = utf16(w);
+        }
+        eprintln!("[am] keyboard: {:?} / {:?} / {:?}, {}..={} chars{}{}", kb.header, kb.sub, kb.guide, kb.min, kb.max, if kb.numeric { ", numbers" } else { "" }, if kb.check { ", checked by the game" } else { "" });
+        kb
+    }
+
+    fn ask(&self, mut error: Option<String>) -> Option<String> {
+        if std::env::var_os("NX_AUTOINPUT").is_some() {
+            return Some(self.initial.clone());
+        }
+        loop {
+            let sub = error.take().map_or(self.sub.clone(), |e| if self.sub.is_empty() { e } else { format!("{e}\n\n{}", self.sub) });
+            let p = crate::gfx::keyboard::Prompt {
+                header: self.header.clone(),
+                sub,
+                guide: self.guide.clone(),
+                ok: self.ok.clone(),
+                initial: self.initial.clone(),
+                password: self.password,
+                numeric: self.numeric,
+            };
+            let text = crate::kernel::blocking(|| crate::gfx::keyboard::prompt(p))?;
+            let text: String = text.chars().filter(|c| !c.is_control()).take(self.max).collect();
+            if self.numeric && !text.chars().all(|c| c.is_ascii_digit()) {
+                error = Some("Only numbers are allowed.".into());
+            } else if text.chars().count() < self.min {
+                error = Some(format!("Enter at least {} characters.", self.min));
+            } else {
+                return Some(text);
+            }
+        }
+    }
+
+    fn encode(&self, t: &str) -> Vec<u8> {
+        if self.utf8 { t.as_bytes().to_vec() } else { t.encode_utf16().flat_map(u16::to_le_bytes).collect() }
+    }
+
+    fn output(&self, text: Option<&str>) -> Vec<u8> {
+        let mut out = vec![0u8; SWKBD_OUTPUT_SIZE];
+        out[..4].copy_from_slice(&(text.is_none() as u32).to_le_bytes());
+        let t = self.encode(text.unwrap_or_default());
+        let n = t.len().min(SWKBD_OUTPUT_SIZE - 6);
+        out[4..4 + n].copy_from_slice(&t[..n]);
+        eprintln!("[am] keyboard: {}", text.map_or("canceled".into(), |t| format!("entered {t:?}")));
+        out
+    }
+
+    fn check_request(&self, text: &str) -> Vec<u8> {
+        let mut out = vec![0u8; SWKBD_CHECK_SIZE];
+        let t = self.encode(text);
+        let n = t.len().min(SWKBD_CHECK_SIZE - 10);
+        out[..8].copy_from_slice(&(n as u64 + 8).to_le_bytes());
+        out[8..8 + n].copy_from_slice(&t[..n]);
+        out
     }
 }
 
@@ -298,21 +464,44 @@ impl Service for LibraryApplet {
             1 => rsp.data.push(1),
             10 => self.run(),
             20 | 25 | 30 | 50 | 60 | 150 => {}
-            100 | 103 => {
+            100 => {
                 if let Some(d) = req.in_objects.first().and_then(|o| o.storage_bytes()) {
                     self.input.lock().unwrap().push(d);
                 }
             }
-            101 | 104 => {
+            103 => {
+                if let Some(d) = req.in_objects.first().and_then(|o| o.storage_bytes()) {
+                    self.checked(&d);
+                }
+            }
+            101 => {
                 let Some(d) = self.output.lock().unwrap().pop_front() else { return NOT_AVAILABLE };
                 rsp.objects.push(Storage::new(d));
             }
-            105 | 106 => rsp.copy_handles.push(self.out_event),
+            104 => {
+                let Some(d) = self.interactive.lock().unwrap().pop_front() else { return NOT_AVAILABLE };
+                rsp.objects.push(Storage::new(d));
+            }
+            105 => rsp.copy_handles.push(self.out_event),
+            106 => rsp.copy_handles.push(self.interactive_event),
             110 => rsp.data.push(0),
             _ => return Stub(self.name()).call(req, rsp),
         }
         0
     }
+}
+
+fn mii_applet(input: &[Vec<u8>]) -> Vec<u8> {
+    let mode = input.iter().skip(1).find_map(|d| d.get(4..8))
+        .map(|d| u32::from_le_bytes(d.try_into().unwrap()));
+    let char_info = matches!(mode, Some(4 | 5));
+    let mut out = vec![0u8; if char_info { 0x80 } else { 0x20 }];
+    out[..4].copy_from_slice(&1u32.to_le_bytes());
+    if !char_info {
+        out[4..8].copy_from_slice(&(-1i32).to_le_bytes());
+    }
+    eprintln!("[am] Mii editor unavailable: returning canceled (mode {mode:?})");
+    out
 }
 
 fn controller_applet(input: &[Vec<u8>]) -> Vec<u8> {
@@ -361,4 +550,45 @@ fn web_applet(input: &[Vec<u8>]) -> Vec<u8> {
     out[8..8 + n].copy_from_slice(&url.as_bytes()[..n]);
     out[0x1008..0x1010].copy_from_slice(&(n as u64).to_le_bytes());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_editor_returns_a_complete_canceled_output() {
+        for (mode, input_size, size) in [(1u32, 0x100, 0x20), (4, 0x100, 0x80), (5, 0x100, 0x80), (4, 0x88, 0x80)] {
+            let mut arg = vec![0u8; input_size];
+            arg[4..8].copy_from_slice(&mode.to_le_bytes());
+            let out = mii_applet(&[vec![0; 0x20], arg]);
+            assert_eq!(out.len(), size);
+            assert_eq!(&out[..4], &1u32.to_le_bytes());
+        }
+    }
+
+    #[test]
+    fn keyboard_reads_the_config_and_writes_utf16_text() {
+        let mut c = vec![0u8; 0x3E0];
+        c[0..4].copy_from_slice(&SWKBD_NUMERIC.to_le_bytes());
+        for (i, u) in "Code".encode_utf16().enumerate() {
+            c[0x24 + 2 * i..0x26 + 2 * i].copy_from_slice(&u.to_le_bytes());
+        }
+        c[0x3AC..0x3B0].copy_from_slice(&12u32.to_le_bytes());
+        let kb = Swkbd::parse(&[vec![0; 0x20], c]);
+        assert!(kb.numeric && !kb.check);
+        assert_eq!((kb.header.as_str(), kb.max, kb.ok.as_str()), ("Code", 12, "OK"));
+        let out = kb.output(Some("12"));
+        assert_eq!(out.len(), SWKBD_OUTPUT_SIZE);
+        assert_eq!(&out[..10], &[0, 0, 0, 0, b'1', 0, b'2', 0, 0, 0]);
+        assert_eq!(&kb.output(None)[..4], &1u32.to_le_bytes());
+        assert_eq!(&kb.check_request("12")[..12], &[12, 0, 0, 0, 0, 0, 0, 0, b'1', 0, b'2', 0]);
+    }
+
+    #[test]
+    fn canceled_output_has_no_valid_index() {
+        let out = mii_applet(&[]);
+        assert_eq!(out.len(), 0x20);
+        assert_eq!(&out[4..8], &(-1i32).to_le_bytes());
+    }
 }

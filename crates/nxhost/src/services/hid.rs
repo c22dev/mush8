@@ -139,7 +139,7 @@ fn start_input_thread() {
     static STARTED: OnceLock<()> = OnceLock::new();
     STARTED.get_or_init(|| {
         let base = shared_memory().host;
-        crate::input::SCREEN_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
+        crate::input::SCREEN_ACTIVE.store(std::env::var("NX_TOUCHSCREEN").as_deref() != Ok("0"), std::sync::atomic::Ordering::Relaxed);
         std::thread::Builder::new()
             .name("hid".into())
             .spawn(move || {

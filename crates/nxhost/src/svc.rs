@@ -29,7 +29,19 @@ pub fn current_guest_fp() -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn dispatch(f: &mut Frame) {
+    if f.x[16] == nxabi::SVC_SPIN as u64 {
+        kernel::spin_wait(f.x[30]);
+        return;
+    }
     GUEST_FP.with(|c| c.set(f.x[29]));
+    let yielding = f.x[16] == 0x0B && f.x[0] as i64 <= 0;
+    if yielding {
+        let mut regs = [0; 10];
+        regs.copy_from_slice(&f.x[19..29]);
+        kernel::yield_backoff(Some(regs));
+    } else {
+        kernel::yield_backoff(None);
+    }
     kernel::sched_point();
     dispatch_inner(f);
     kernel::sched_point();
@@ -155,7 +167,7 @@ fn dispatch_inner(f: &mut Frame) {
         0x13 => map_shared_memory(x[0] as u32, x[1], x[2]),
         0x14 => rc::OK,
         0x15 => {
-            let h = KERNEL.lock().add(Obj::TransferMemory);
+            let h = KERNEL.lock().add(Obj::TransferMemory { addr: x[1], size: x[2] });
             f.x[1] = h as u64;
             rc::OK
         }

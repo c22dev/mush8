@@ -92,6 +92,10 @@ impl SystemSink {
         eprintln!("[audio] system renderer, {:.0} ms ahead", lead * 1000.0);
     }
 
+    pub fn stopped(&self) -> bool {
+        self.running.as_ref().is_some_and(|(_, feeder)| !feeder.is_finished()) && unsafe { self.renderer.sync.rate() } == 0.0
+    }
+
     pub fn stop(&mut self) {
         let Some((stop, feeder)) = self.running.take() else { return };
         stop.store(true, Relaxed);

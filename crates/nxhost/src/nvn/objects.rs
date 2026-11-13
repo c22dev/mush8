@@ -14,6 +14,7 @@ pub struct MemoryPool {
     pub cpu: u64,
     pub size: u64,
     pub flags: u32,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,15 +198,18 @@ pub fn host_impl(name: &str) -> Option<HostFn> {
     Some(match name {
         "nvnMemoryPoolInitialize" => |a| {
             let b = a.0[1];
-            let p = MemoryPool { cpu: rd(b + 8), size: rd(b + 0x10), flags: rd(b + 0x18) };
+            static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let generation = GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let p = MemoryPool { cpu: rd(b + 8), size: rd(b + 0x10), flags: rd(b + 0x18), generation };
             init_pool_struct(a.0[0], &p);
+            crate::gfx::heap_touch(p.cpu, p.size);
             state().pools.insert(a.0[0], p);
             1
         },
         "nvnMemoryPoolFinalize" => |a| {
-            if let Some(p) = state().pools.remove(&a.0[0]) {
-                super::draw::forget_memory(p.cpu, p.size);
-                super::draw::forget_memory(a.0[0] | 1 << 63, p.size);
+            let p = state().pools.get(&a.0[0]).copied();
+            if let Some(p) = p {
+                super::draw::free_pool(a.0[0], p);
             }
             0
         },

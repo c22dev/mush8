@@ -5,7 +5,7 @@ mod draw;
 mod fx;
 pub use draw::{precompile, prewarm};
 mod objects;
-mod tex;
+pub(crate) mod tex;
 
 use crate::stubs::{self, Args};
 use std::collections::HashMap;
