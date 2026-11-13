@@ -269,7 +269,7 @@ impl Hash for PipeKey {
 pub struct States {
     pipelines: FastMap<PipeKey, Option<Shared<Pipeline>>>,
     pending: super::shaders::Jobs<PipeKey>,
-    depth: FastMap<(u64, [u32; 4], bool, bool), Shared<DepthState>>,
+    depth: FastMap<(u64, [u32; 4], bool, bool, bool), Shared<DepthState>>,
 }
 
 static DONE: LazyLock<Mutex<Vec<(PipeKey, Option<Shared<Pipeline>>)>>> = LazyLock::new(Default::default);
@@ -422,16 +422,17 @@ impl States {
         }
     }
 
-    pub fn depth_stencil(&mut self, st: &GState, has_depth: bool, has_stencil: bool) -> Shared<DepthState> {
+    pub fn depth_stencil(&mut self, st: &GState, has_depth: bool, has_stencil: bool, far_plane: bool) -> Shared<DepthState> {
         let masks = [st.stencil_read[0], st.stencil_read[1], st.stencil_write[0], st.stencil_write[1]];
-        let key = (st.depth_stencil, masks, has_depth, has_stencil);
+        let tolerant = equal_tolerance(st, far_plane);
+        let key = (st.depth_stencil, masks, has_depth, has_stencil, tolerant);
         self.depth
             .entry(key)
             .or_insert_with(|| {
                 let (w0, w1) = (st.depth_stencil as u32, (st.depth_stencil >> 32) as u32);
                 let d = MTLDepthStencilDescriptor::new();
                 if has_depth && w0 & 1 != 0 {
-                    d.setDepthCompareFunction(compare_fn(w0 >> 4 & 0xF));
+                    d.setDepthCompareFunction(if tolerant { MTLCompareFunction::LessEqual } else { compare_fn(w0 >> 4 & 0xF) });
                     d.setDepthWriteEnabled(w0 & 2 != 0);
                 }
                 if has_stencil && w0 & 4 != 0 {
@@ -465,6 +466,18 @@ fn pipeline_job(key: PipeKey, vs: &Arc<Compiled>, fs: &Arc<Compiled>, t: &Target
         DONE.lock().unwrap().push((key, p));
     })
 }
+
+// Skies are drawn on the far plane (z = w) after a depth pre-pass, with a depth test of EQUAL or LEQUAL and depth
+// writes off. On a Switch every such mesh lands on exactly 1.0. On Metal two sky meshes differ by a few ulps, so
+// the test drops whole triangles (Sky-High Sundae, Wii Rainbow Road). Only these far-plane draws test LEQUAL,
+// pulled EQUAL_BIAS ulps toward the camera. 0 is not enough for the sky domes, and -64 drew the Mute City sky over
+// its most distant skyscrapers.
+pub fn equal_tolerance(st: &GState, far_plane: bool) -> bool {
+    let w0 = st.depth_stencil as u32;
+    far_plane && w0 & 1 != 0 && w0 & 2 == 0 && matches!(w0 >> 4 & 0xF, 3 | 4)
+}
+
+pub const EQUAL_BIAS: f32 = -4.0;
 
 fn build_pipeline(vs: &Compiled, fs: &Compiled, t: &Targets, color_state: u32, channel_mask: u32, blend: &[u64; 8], name: &str) -> Option<Shared<Pipeline>> {
     let t0 = std::time::Instant::now();

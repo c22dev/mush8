@@ -611,7 +611,8 @@ fn parse_guest(line: &str) -> Option<((u64, u32, u32, u32), GuestShader)> {
             attributes: u(f[6])?,
             outputs: u(f[7])?,
             color_targets: u(f[8])?,
-            writes_depth: f[9] == "1",
+            writes_depth: u(f[9])? & 1 != 0,
+            far_plane: u(f[9])? & 2 != 0,
         },
     };
     (g.entry.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| ((gk, extra, uints, sints), g))
@@ -634,7 +635,7 @@ fn guest_line(gk: u64, [extra, uints, sints]: [u32; 3], msl: u64, entry: &str, i
         iface.attributes,
         iface.outputs,
         iface.color_targets,
-        iface.writes_depth as u8
+        iface.writes_depth as u8 | (iface.far_plane as u8) << 1
     )
 }
 
