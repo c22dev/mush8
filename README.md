@@ -76,9 +76,8 @@ Dynamic resolution is on by default. In races and replays, the game lowers its r
 The other settings under Graphics change how the game samples textures. They apply only to textures from the game files, not to images that the game draws itself:
 - Anisotropic filtering keeps textures sharp on surfaces that you see at an angle, such as the road ahead. Game default keeps the value of the game
 - Texture filtering sets how textures change between detail levels (mip levels). Trilinear blends between them. Bilinear switches between them, which is a little faster but can show lines on the road. Game default keeps the choice of the game for each texture
-- Texture LOD bias moves the detail level. A value below 0 shows sharper textures in the distance, and a value above 0 blurs them. Values far below 0 can make textures shimmer
 
-The same settings are environment variables for `nxhost`: `NX_4K=1`, `NX_DYNRES=0`, `NX_ANISO=<2 to 16>`, `NX_TEXTURE_FILTER=<bilinear or trilinear>` and `NX_LOD_BIAS=<-4 to 4>`
+The same settings are environment variables for `nxhost`: `NX_4K=1`, `NX_DYNRES=0`, `NX_ANISO=<2 to 16>` and `NX_TEXTURE_FILTER=<bilinear or trilinear>`
 
 ## Multiplayer
 Pick a mode in the launcher, under Multiplayer :

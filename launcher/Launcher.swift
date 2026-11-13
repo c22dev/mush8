@@ -106,7 +106,6 @@ final class Settings: ObservableObject {
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
     @Published var anisotropy = 0
-    @Published var lodBias = 0.0
     @Published var textureFilter = "game"
     @Published var disabledMods: [String] = []
     private var autosave: AnyCancellable?
@@ -149,7 +148,6 @@ final class Settings: ObservableObject {
         hudAtEdges = j["hud"] as? String != "center"
         hudScale = j["hud_scale"] as? Double ?? 1.0
         anisotropy = j["anisotropy"] as? Int ?? 0
-        lodBias = j["lod_bias"] as? Double ?? 0.0
         textureFilter = j["texture_filter"] as? String ?? (j["trilinear"] as? Bool == true ? "trilinear" : "game")
         disabledMods = j["disabled_mods"] as? [String] ?? []
     }
@@ -167,7 +165,7 @@ final class Settings: ObservableObject {
             "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion, "touchscreen": touchscreen,
             "handheld": handheld, "uhd": uhd, "dynamic_resolution": dynamicResolution, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
-            "anisotropy": anisotropy, "lod_bias": lodBias, "texture_filter": textureFilter,
+            "anisotropy": anisotropy, "texture_filter": textureFilter,
             "disabled_mods": disabledMods,
         ]
         try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
@@ -211,7 +209,6 @@ final class Settings: ObservableObject {
         if hudScale != 1 { env["NX_HUD_SCALE"] = String(hudScale) }
         if !dynamicResolution { env["NX_DYNRES"] = "0" }
         if anisotropy > 1 { env["NX_ANISO"] = String(anisotropy) }
-        if lodBias != 0 { env["NX_LOD_BIAS"] = String(lodBias) }
         if textureFilter != "game" { env["NX_TEXTURE_FILTER"] = textureFilter }
         return env
     }
@@ -686,11 +683,6 @@ struct LauncherView: View {
                     Text("Trilinear").tag("trilinear")
                 } label: {
                     labeled("Texture filtering", "Trilinear blends between texture detail levels. Bilinear switches between them, a little faster but with visible lines")
-                }
-                HStack {
-                    labeled("Texture LOD bias", "Below 0 shows sharper textures in the distance, above 0 blurs them")
-                    Slider(value: $s.lodBias, in: -2...2, step: 0.25)
-                    Text(s.lodBias == 0 ? "0" : String(format: "%+.2f", s.lodBias)).monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
                 }
             }
         }
