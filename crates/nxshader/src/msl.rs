@@ -60,6 +60,8 @@ pub struct Interface {
 
     pub color_targets: u32,
     pub writes_depth: bool,
+    // the vertex shader puts every vertex on the far plane (z = w), the way skies are drawn
+    pub far_plane: bool,
 }
 
 pub struct Translated {
@@ -2052,6 +2054,7 @@ fn translate_code(sph: &Sph, code: &[u8], extra_outputs: u32, uint_targets: u32,
     out.push_str(&g.body);
     out.push_str("    default:\n        return epilogue();\n    }\n    }\n}\n");
     let mut interface = g.iface;
+    interface.far_plane = stage == Stage::Vertex && on_far_plane(&g.body);
     if stage == Stage::Fragment && interface.color_targets == 0 && !interface.writes_depth {
         interface.color_targets = 1;
     }
@@ -2062,4 +2065,34 @@ fn translate_code(sph: &Sph, code: &[u8], extra_outputs: u32, uint_targets: u32,
         out.push_str(&format!("// warnings: {}\n", w.join("; ")));
     }
     Ok(Translated { stage, msl: out, entry: entry.into(), interface })
+}
+
+// o.pos.z and o.pos.w are set once each from the same register, which nothing writes in between
+fn on_far_plane(body: &str) -> bool {
+    let lines: Vec<&str> = body.lines().map(str::trim).collect();
+    let find = |c: char| {
+        let at: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| l.starts_with(&format!("o.pos.{c} = "))).map(|(i, _)| i).collect();
+        let &[i] = at.as_slice() else { return None };
+        let reg = lines[i].strip_prefix(&format!("o.pos.{c} = as_type<float>("))?.strip_suffix(");")?;
+        (reg.starts_with('r') && reg[1..].chars().all(|d| d.is_ascii_digit())).then(|| (i, reg.to_string()))
+    };
+    let (Some((z, rz)), Some((w, rw))) = (find('z'), find('w')) else { return false };
+    let (lo, hi) = (z.min(w), z.max(w));
+    rz == rw && !lines[lo..hi].iter().any(|l| l.starts_with(&format!("{rz} = ")) || l.starts_with("case ") || l.contains('{') || l.contains('}'))
+}
+
+#[cfg(test)]
+mod far_plane_tests {
+    use super::on_far_plane;
+
+    #[test]
+    fn same_register_is_far_plane() {
+        assert!(on_far_plane("        o.pos.z = as_type<float>(r1);\n        r0 = r2;\n        o.pos.w = as_type<float>(r1);\n"));
+    }
+
+    #[test]
+    fn other_register_or_rewrite_is_not() {
+        assert!(!on_far_plane("        o.pos.z = as_type<float>(r1);\n        o.pos.w = as_type<float>(r2);\n"));
+        assert!(!on_far_plane("        o.pos.z = as_type<float>(r1);\n        r1 = r2;\n        o.pos.w = as_type<float>(r1);\n"));
+    }
 }
