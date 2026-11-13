@@ -445,13 +445,14 @@ impl Textures {
 
 // The game relies on negative biases (-1 to -2.5) to keep its nearest-mip samplers sharp. Metal ignores
 // MTLSamplerDescriptor.lodBias on Apple7 GPUs (M1), so the fragment shaders add this value themselves,
-// with the user's LOD bias on mipmapped game textures.
+// with the user's LOD bias on mipmapped 2D game textures. Cube maps hold prefiltered lighting, and a bias on them
+// darkens characters.
 pub fn lod_bias(b: &[u8; 0x60], tex: &Texture) -> f32 {
     let mut bias = f32_at(b, 0x24);
     if !bias.is_finite() {
         bias = 0.0;
     }
-    if enhanced(tex) && matches!(u32_at(b, 8), 2..=5) {
+    if enhanced(tex) && matches!(u32_at(b, 8), 2..=5) && tex.textureType() == MTLTextureType::Type2D {
         bias += ENHANCE.lod_bias;
     }
     bias.clamp(-16.0, 15.99)
