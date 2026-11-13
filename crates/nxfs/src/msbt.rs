@@ -7,10 +7,15 @@ pub struct Msbt {
     sections: Vec<([u8; 4], Vec<u8>)>,
     labels: Vec<(String, usize)>,
     texts: Vec<Vec<u8>>,
+    added: bool,
 }
 
 fn u32_at(b: &[u8], o: usize) -> Result<u32> {
     Ok(u32::from_le_bytes(b.get(o..o + 4).context("MSBT cut short")?.try_into()?))
+}
+
+fn encode(text: &str) -> Vec<u8> {
+    text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect()
 }
 
 impl Msbt {
@@ -49,7 +54,7 @@ impl Msbt {
             texts.push(txt.get(start..end).context("MSBT text out of range")?.to_vec());
         }
         labels.sort_by_key(|(_, i)| *i);
-        Ok(Self { header: data[..0x20].to_vec(), sections, labels, texts })
+        Ok(Self { header: data[..0x20].to_vec(), sections, labels, texts, added: false })
     }
 
     pub fn labels(&self) -> impl Iterator<Item = &str> {
@@ -64,8 +69,47 @@ impl Msbt {
 
     pub fn set_text(&mut self, label: &str, text: &str) -> Result<()> {
         let (_, i) = self.labels.iter().find(|(l, _)| l == label).with_context(|| format!("no label {label}"))?;
-        self.texts[*i] = text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        self.texts[*i] = encode(text);
         Ok(())
+    }
+
+    pub fn add_text(&mut self, label: &str, text: &str) -> Result<()> {
+        if self.labels.iter().any(|(l, _)| l == label) {
+            return self.set_text(label, text);
+        }
+        ensure!(!label.is_empty() && label.len() < 256, "label {label} must be 1 to 255 bytes");
+        ensure!(self.sections.iter().any(|(m, _)| m == b"LBL1"), "this MSBT has no labels");
+        if let Some((m, _)) = self.sections.iter().find(|(m, _)| !matches!(m, b"LBL1" | b"TXT2")) {
+            anyhow::bail!("cannot add label {label}: the MSBT has a {} section", String::from_utf8_lossy(m));
+        }
+        self.labels.push((label.to_string(), self.texts.len()));
+        self.texts.push(encode(text));
+        self.added = true;
+        Ok(())
+    }
+
+    fn label_table(&self, old: &[u8]) -> Vec<u8> {
+        let buckets = u32_at(old, 0).unwrap_or(1).max(1) as usize;
+        let mut slots: Vec<Vec<&(String, usize)>> = vec![Vec::new(); buckets];
+        for l in &self.labels {
+            let h = l.0.bytes().fold(0u32, |h, c| h.wrapping_mul(0x492).wrapping_add(c as u32));
+            slots[h as usize % buckets].push(l);
+        }
+        let mut head = (buckets as u32).to_le_bytes().to_vec();
+        let mut names = Vec::new();
+        let mut at = 4 + 8 * buckets;
+        for s in &slots {
+            head.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            head.extend_from_slice(&(at as u32).to_le_bytes());
+            for (name, i) in s {
+                names.push(name.len() as u8);
+                names.extend_from_slice(name.as_bytes());
+                names.extend_from_slice(&(*i as u32).to_le_bytes());
+                at += 1 + name.len() + 4;
+            }
+        }
+        head.extend_from_slice(&names);
+        head
     }
 
     pub fn build(&self) -> Vec<u8> {
@@ -80,6 +124,8 @@ impl Msbt {
                 }
                 self.texts.iter().for_each(|s| t.extend_from_slice(s));
                 t
+            } else if magic == b"LBL1" && self.added {
+                self.label_table(body)
             } else {
                 body.clone()
             };
@@ -144,5 +190,16 @@ mod tests {
         assert_eq!(m.text("A_Name").as_deref(), Some("Peter Griffin"));
         assert_eq!(m.text("B_Name").as_deref(), Some("Luigi"));
         assert!(Msbt::parse(&sample()).unwrap().set_text("C", "x").is_err());
+    }
+
+    #[test]
+    fn add_text_adds_a_label() {
+        let mut m = Msbt::parse(&sample()).unwrap();
+        m.add_text("1470", "GPDX").unwrap();
+        m.add_text("A_Name", "Toad").unwrap();
+        let m = Msbt::parse(&m.build()).unwrap();
+        assert_eq!(m.text("1470").as_deref(), Some("GPDX"));
+        assert_eq!(m.text("A_Name").as_deref(), Some("Toad"));
+        assert_eq!(m.text("B_Name").as_deref(), Some("Luigi"));
     }
 }

@@ -8,6 +8,7 @@ struct Mod: Identifiable, Sendable {
     let path: String
     let romfs: Bool
     let patches: [String]
+    let modules: [String]
     let replacedModules: Bool
     let unsupportedFiles: [String]
 
@@ -22,6 +23,7 @@ struct Mod: Identifiable, Sendable {
         var parts: [String] = []
         if romfs { parts.append("replaces game files") }
         if !patches.isEmpty { parts.append(patches.count == 1 ? "1 code patch" : "\(patches.count) code patches") }
+        if !modules.isEmpty { parts.append(modules.count == 1 ? "1 code module" : "\(modules.count) code modules") }
         if replacedModules { parts.append("replaced code modules are not supported") }
         if !unsupportedFiles.isEmpty { parts.append("unsupported files: " + unsupportedFiles.joined(separator: ", ")) }
         return parts.isEmpty ? "no code patches in exefs" : parts.joined(separator: ", ")
@@ -54,6 +56,12 @@ func isCodePatch(_ url: URL) -> Bool {
     case "ips": return isBuildID(url.lastPathComponent.split(separator: ".").first.map(String.init) ?? "")
     default: return false
     }
+}
+
+// subsdk1 to subsdk9 are extra code modules; the game's own modules are main, subsdk0 and sdk
+func isCodeModule(_ url: URL) -> Bool {
+    let name = url.lastPathComponent.lowercased()
+    return url.pathExtension.isEmpty && name.count == 7 && name.hasPrefix("subsdk") && ("1"..."9").contains(String(name.last!))
 }
 
 func isBuildID(_ name: String) -> Bool {
@@ -153,6 +161,14 @@ func modInfo(at dir: URL, relativeTo folder: URL, id: String) -> Mod? {
     guard content != nil || hasPatches, let path = relative(dir) else { return nil }
     let patchPaths = patches.compactMap(relative)
     guard patchPaths.count == patches.count else { return nil }
+    // code modules run on macOS only, so iOS counts them as replaced game modules
+    #if os(iOS)
+    let modules: [URL] = []
+    let extraModules = false
+    #else
+    let modules = files.filter(isCodeModule)
+    let extraModules = true
+    #endif
     let romfsStubs = romfs.map { stubFiles(in: $0) } ?? []
     let exefsEntries = exefs.map { modEntries($0) } ?? []
     let plugins = (romfs.flatMap { caselessChild($0, "skyline") }.flatMap { caselessChild($0, "plugins") }.map { modEntries($0) } ?? [])
@@ -169,9 +185,9 @@ func modInfo(at dir: URL, relativeTo folder: URL, id: String) -> Mod? {
         + exefsEntries.filter { $0.pathExtension.caseInsensitiveCompare("stub") == .orderedSame }
         + romfsStubs + plugins + (badNpdm ? npdm.map { [$0] } ?? [] : [])
     return Mod(id: id, name: name, path: path, romfs: romfs != nil,
-               patches: patchPaths, replacedModules: exefsEntries.contains {
+               patches: patchPaths, modules: modules.compactMap(relative), replacedModules: exefsEntries.contains {
                    let name = $0.lastPathComponent.lowercased()
-                   return ["main", "sdk", "rtld"].contains(name) || (name.hasPrefix("subsdk") && $0.pathExtension.isEmpty)
+                   return ["main", "sdk", "rtld"].contains(name) || (name.hasPrefix("subsdk") && $0.pathExtension.isEmpty && !(extraModules && isCodeModule($0)))
                }, unsupportedFiles: unsupportedFiles.map(\.lastPathComponent))
 }
 

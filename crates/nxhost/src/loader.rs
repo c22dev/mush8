@@ -15,7 +15,9 @@ pub struct Module {
     pub base: u64,
     pub size: u64,
     pub text: u64,
+    pub ro: (u64, u64),
     pub data: (u64, u64),
+    pub bss: (u64, u64),
     pub keypage: u64,
     pub tramp: (u64, u64),
     pub dynamic: Dynamic,
@@ -101,12 +103,18 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
             base,
             size,
             text: get("text")?.1,
+            ro: get("ro")?,
             data: get("data")?,
+            bss: get("bss")?,
             keypage: get("keypage")?.0,
             tramp: get("tramp")?,
             dynamic,
         });
         next = next.max(base + size + PAGE);
+    }
+
+    if mods.len() > 3 {
+        crate::plugins::init(next, &mods[0])?;
     }
 
     let mut table: HashMap<&str, (u64, bool, bool)> = HashMap::new();
@@ -128,6 +136,7 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
 
     let mut hle = hle.clone();
     hle.extend(crate::movie::overrides());
+    hle.extend(crate::plugins::table());
     let hle = &hle;
     let mut stub_of: HashMap<String, u64> = HashMap::new();
     let trace_pats: Vec<String> = std::env::var("NX_TRACE_SYMS").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
@@ -174,7 +183,7 @@ pub fn load(dir: &Path, names: &[&str], hle: &HashMap<&str, u64>) -> Result<Vec<
             unsafe { p.write_unaligned(v) };
         }
     }
-    for name in hle.keys() {
+    for name in hle.keys().filter(|n| !crate::plugins::is_api(n)) {
         ensure!(used_hle.contains(*name), "host override {name} is referenced by no module");
     }
 
@@ -264,7 +273,7 @@ fn debug_breakpoints(mods: &[Module]) -> Result<()> {
     Ok(())
 }
 
-fn icache_flush(addr: u64, size: u64) {
+pub fn icache_flush(addr: u64, size: u64) {
     unsafe extern "C" {
         fn sys_icache_invalidate(start: *mut libc::c_void, len: usize);
     }
