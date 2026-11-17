@@ -134,5 +134,8 @@ Thanks to everyone who contributed :
 
 Contributions are welcome !
 
+## Disclaimer
+Mush8 is an independent project, it's not affiliated with or endorsed by Nintendo. Mario Kart 8 Deluxe and Nintendo Switch are trademarks of Nintendo. This repo doesn't ship any game files, keys or firmware, and it won't help you get them either
+
 ## Third party
 - [libvpx](https://chromium.googlesource.com/webm/libvpx) v1.17.0 VP8 decoder (BSD 3-Clause, see `crates/vpx/libvpx/LICENSE` and `PATENTS`) : WebM movies
