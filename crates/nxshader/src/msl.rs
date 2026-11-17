@@ -290,9 +290,13 @@ impl<'a> Gen<'a> {
         let c = self.coord(coords, n);
 
         let arr = array.map(|a| format!(", ({} & 0xffffu)", self.r(a)));
+        // the sampler's LOD bias, which Metal ignores on Apple7 GPUs (M1), so the host passes it per texture
+        let frag = self.sph.stage == Stage::Fragment && depth_ref.is_none();
         let level = match (&lod, &bias) {
             (Some(l), _) => format!(", level({l})"),
+            (None, Some(bb)) if frag => format!(", bias({bb} + res.lod_bias[{b}])"),
             (None, Some(bb)) => format!(", bias({bb})"),
+            (None, None) if frag => format!(", bias(res.lod_bias[{b}])"),
             _ => String::new(),
         };
         let arr = arr.unwrap_or_default();
@@ -1576,6 +1580,7 @@ struct Res {
     ulong heap_size;
     ulong heap_chunk_size;
     ulong zero_gpu;
+    float lod_bias[32];
 };
 
 static inline device uint* gmem(constant Res& res, ulong ga) {
