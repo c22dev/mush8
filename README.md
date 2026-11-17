@@ -10,7 +10,7 @@ On macOS, the patched game code is loaded when you launch it. On iOS, and becaus
 On top of that, Mush8 adds LAN Play over the internet ([lan-play.com](https://www.lan-play.com) servers) and a wireless mode for nearby devices
 
 ## Game files
-Because Nintendo ninjas are always watching, you will need your own dump :
+No game files, keys or firmware are included here, and there never will be. You will need your own dump, taken from a Switch you own :
 - `prod.keys`
 - the base game (`.nsp`)
 - update 4.0.1 or 3.0.5 (`.nsp`). To play LAN with a Switch, use the same update as the Switch
