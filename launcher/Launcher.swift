@@ -34,12 +34,12 @@ func tool(_ name: String, in folder: URL) -> URL {
 
 private var nxpatchStamps: [String: String] = [:]
 
-func gameCodeReady(in folder: URL, patches: [String]) -> Bool {
+func gameCodeReady(in folder: URL, patches: [String], modules: [String]) -> Bool {
     let made = try? String(contentsOf: folder.appendingPathComponent("work/v-upd/patched/nxpatch.stamp"), encoding: .utf8)
     guard let made else { return false }
     let tool = tool("nxpatch", in: folder)
-    let args = ["stamp"] + patches.flatMap { ["--patch", $0] }
-    let modified = patches.map { p in
+    let args = ["stamp"] + patches.flatMap { ["--patch", $0] } + modules.flatMap { ["--module", $0] }
+    let modified = (patches + modules).map { p in
         (try? FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent(p).path)[.modificationDate] as? Date).map { "\($0.timeIntervalSince1970)" } ?? ""
     }
     let key = ([tool.path] + args + modified).joined(separator: "\n")
@@ -105,6 +105,7 @@ final class Settings: ObservableObject {
     @Published var hudAtEdges = true
     @Published var hudScale = 1.0
     @Published var disabledMods: [String] = []
+    @Published var modOrder: [String] = []
     private var autosave: AnyCancellable?
 
     init() {
@@ -144,11 +145,23 @@ final class Settings: ObservableObject {
         hudAtEdges = j["hud"] as? String != "center"
         hudScale = j["hud_scale"] as? Double ?? 1.0
         disabledMods = j["disabled_mods"] as? [String] ?? []
+        modOrder = j["mod_order"] as? [String] ?? []
     }
 
     var folderURL: URL { URL(fileURLWithPath: folder) }
 
     func codePatches(_ mods: [Mod]) -> [String] { enabledCodePatches(mods, disabled: disabledMods) }
+
+    // The installed mods in the saved order; mods that are not in it come after, in name order
+    func installed() -> [Mod] { ordered(installedMods(in: folderURL), by: modOrder) }
+
+    func moveMods(_ mods: [Mod], from source: IndexSet, to destination: Int) {
+        var ids = mods.map(\.id)
+        ids.move(fromOffsets: source, toOffset: destination)
+        modOrder = ids
+    }
+
+    func codeModules(_ mods: [Mod]) -> [String] { enabledCodeModules(mods, disabled: disabledMods) }
 
     func save() {
         let j: [String: Any] = [
@@ -159,7 +172,7 @@ final class Settings: ObservableObject {
             "prewarm_pipelines": prewarm, "rumble": rumble, "rumble_min": rumbleMin, "gamepad_driver": padDriver, "spatial_audio": spatial, "background_compile": backgroundCompile, "motion_controls": motion, "touchscreen": touchscreen,
             "handheld": handheld, "uhd": uhd, "split60": split60, "phone_pads": phonePads, "browser_pads": browserPads,
             "aspect": fillScreen ? "fill" : "16:9", "hud": hudAtEdges ? "edges" : "center", "hud_scale": hudScale,
-            "disabled_mods": disabledMods,
+            "disabled_mods": disabledMods, "mod_order": modOrder,
         ]
         try? FileManager.default.createDirectory(at: supportURL, withIntermediateDirectories: true)
         if let data = try? JSONSerialization.data(withJSONObject: j, options: [.prettyPrinted, .sortedKeys]) {
@@ -215,6 +228,15 @@ func enabledCodePatches(_ mods: [Mod], disabled: [String]) -> [String] {
     mods.filter { !disabled.contains($0.id) && $0.loadable }.flatMap(\.patches)
 }
 
+func enabledCodeModules(_ mods: [Mod], disabled: [String]) -> [String] {
+    mods.filter { !disabled.contains($0.id) && $0.loadable }.flatMap(\.modules)
+}
+
+func ordered(_ mods: [Mod], by order: [String]) -> [Mod] {
+    let rank = { (m: Mod) in order.firstIndex(of: m.id) ?? Int.max }
+    return mods.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+}
+
 struct Check: Identifiable {
     let id: String
     let ok: Bool
@@ -234,7 +256,7 @@ func checks(_ s: Settings, mods: [Mod]) -> [Check] {
         Check(id: "Update", ok: has(s.update), detail: has(s.update) ? s.update : "not found"),
         Check(id: "Booster Course Pass", ok: has(s.dlc), detail: has(s.dlc) ? s.dlc : "none", optional: true),
         Check(id: "Mods", ok: !mods.isEmpty, detail: mods.isEmpty ? "none" : "\(on) of \(mods.count) on", optional: true),
-        Check(id: "Game code for this Mac", ok: gameCodeReady(in: f, patches: s.codePatches(mods)) && preparedSource(in: f) == updateSource(s),
+        Check(id: "Game code for this Mac", ok: gameCodeReady(in: f, patches: s.codePatches(mods), modules: s.codeModules(mods)) && preparedSource(in: f) == updateSource(s),
               detail: preparedVersion(in: f).map { "work/v-upd/patched (\($0))" } ?? "work/v-upd/patched"),
         Check(id: "Precompiled shaders", ok: (shaders ?? 0) > 0,
               detail: shaders == 0 ? "none, install the Metal Toolchain and Prepare again" : "work/shader_cache.noindex/heap-segments-v2", optional: shaders == 0),
@@ -251,6 +273,7 @@ final class Preparer: ObservableObject {
     func run(_ s: Settings, mods: [Mod], done: @escaping () -> Void) {
         let f = s.folderURL
         let disabled = s.disabledMods
+        let order = s.modOrder
         var steps: [(URL, () -> [String])] = []
         let fm = FileManager.default
         if preparedSource(in: f) != updateSource(s) || !fm.fileExists(atPath: f.appendingPathComponent("work/v-upd/exefs/main").path) {
@@ -260,9 +283,13 @@ final class Preparer: ObservableObject {
             let extract = ["extract", "--keys", s.keys, "--base", s.base, "--update", s.update, "--out", "work/v-upd"]
             steps.append((tool("nxfs", in: f), { extract }))
         }
-        if !gameCodeReady(in: f, patches: s.codePatches(mods)) {
-            steps.append((tool("nxpatch", in: f), { ["rewrite", "--out", "work/v-upd/patched", "work/v-upd/exefs/main", "work/v-upd/exefs/subsdk0", "work/v-upd/exefs/sdk"]
-                + enabledCodePatches(installedMods(in: f), disabled: disabled).flatMap { ["--patch", $0] } }))
+        if !gameCodeReady(in: f, patches: s.codePatches(mods), modules: s.codeModules(mods)) {
+            steps.append((tool("nxpatch", in: f), {
+                let now = ordered(installedMods(in: f), by: order)
+                return ["rewrite", "--out", "work/v-upd/patched", "work/v-upd/exefs/main", "work/v-upd/exefs/subsdk0", "work/v-upd/exefs/sdk"]
+                    + enabledCodePatches(now, disabled: disabled).flatMap { ["--patch", $0] }
+                    + enabledCodeModules(now, disabled: disabled).flatMap { ["--module", $0] }
+            }))
         }
         let precompile = s.arguments(mods) + ["--precompile"]
         steps.append((tool("nxhost", in: f), { precompile }))
@@ -753,7 +780,7 @@ struct LauncherView: View {
     }
 
     func reload() {
-        mods = installedMods(in: s.folderURL)
+        mods = s.installed()
         miiCount = s.folder.isEmpty ? 0 : installedMiiCount(in: s.folderURL)
     }
 
@@ -771,12 +798,12 @@ struct LauncherView: View {
 
     func prepare() {
         s.save()
-        mods = installedMods(in: s.folderURL)
+        mods = s.installed()
         prep.run(s, mods: mods) { tick += 1 }
     }
 
     func play() {
-        mods = installedMods(in: s.folderURL)
+        mods = s.installed()
         guard checks(s, mods: mods).allSatisfy({ $0.ok || $0.optional }) else {
             launchError = "Your game files or mods changed. Prepare again before playing."
             return
@@ -836,18 +863,27 @@ struct ModsView: View {
     @State private var actionError: String?
 
     var body: some View {
-        CategoryPage(title: "Mods") {
+        CategoryPage(title: "Mods", list: true) {
             Section {
                 if mods.isEmpty {
                     Text("No mods installed. Browse GameBanana to add one.").foregroundStyle(.secondary)
                 }
                 ForEach(mods) { m in
-                    ModRow(mod: m, disabled: $s.disabledMods, warning: patchWarning(m, skipped: skipped), inspect: { inspectedMod = m }, delete: { deletingMod = m })
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "line.3.horizontal").foregroundStyle(.secondary).padding(.top, 3)
+                        ModRow(mod: m, disabled: $s.disabledMods, warning: patchWarning(m, skipped: skipped), inspect: { inspectedMod = m }, delete: { deletingMod = m })
+                    }
+                }
+                .onMove { from, to in
+                    withAnimation {
+                        s.moveMods(mods, from: from, to: to)
+                        mods = s.installed()
+                    }
                 }
             } header: {
                 ModsHeader(mods: mods, disabled: s.disabledMods)
             } footer: {
-                Text("Lower mods win conflicts. Code patches apply on the next Prepare")
+                Text("Drag to reorder. Lower mods win conflicts. Code patches apply on the next Prepare")
                     .font(.caption).foregroundStyle(.secondary)
             }
         } accessory: {
@@ -863,14 +899,14 @@ struct ModsView: View {
             ModBrowserView(folder: s.folderURL) { name in
                 s.disabledMods.removeAll { $0 == name }
                 s.save()
-                mods = installedMods(in: s.folderURL)
+                mods = s.installed()
                 onInstalled()
             }
         }
     }
 
     func reload() {
-        mods = installedMods(in: s.folderURL)
+        mods = s.installed()
         skipped = skippedPatches(in: s.folderURL)
     }
 
@@ -880,7 +916,7 @@ struct ModsView: View {
             try deleteInstalledMod(mod, in: s.folderURL)
             s.disabledMods.removeAll { $0 == mod.id }
             s.save()
-            mods = installedMods(in: s.folderURL)
+            mods = s.installed()
             onInstalled()
         } catch { actionError = error.localizedDescription }
     }
@@ -908,12 +944,14 @@ struct CategoryLabel: View {
 
 struct CategoryPage<Content: View, Accessory: View>: View {
     let title: String
+    var list = false
     @ViewBuilder let content: Content
     @ViewBuilder let accessory: Accessory
     @Environment(\.dismiss) private var dismiss
 
-    init(title: String, @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory = { EmptyView() }) {
+    init(title: String, list: Bool = false, @ViewBuilder content: () -> Content, @ViewBuilder accessory: () -> Accessory = { EmptyView() }) {
         self.title = title
+        self.list = list
         self.content = content()
         self.accessory = accessory()
     }
@@ -932,9 +970,15 @@ struct CategoryPage<Content: View, Accessory: View>: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
-            Form { content }.formStyle(.grouped)
+            // a List, unlike a Form, lets rows be dragged to reorder them (the mod order)
+            if list {
+                List { content }.listStyle(.inset).scrollContentBackground(.hidden)
+            } else {
+                Form { content }.formStyle(.grouped)
+            }
             if Accessory.self != EmptyView.self {
                 HStack { accessory; Spacer() }
+                    .padding(.top, list ? 8 : 0)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 8)
             }

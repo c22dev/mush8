@@ -69,6 +69,11 @@ fn root(dir: &Path) -> Result<PathBuf> {
     bail!("{}: no RomFS/ExeFS mod for Mario Kart 8 Deluxe ({TITLE_ID}), or exefs_patches directory", dir.display())
 }
 
+// subsdk1 to subsdk9 are extra code modules, which nxpatch converts on macOS (see README, Code modules)
+fn is_code_module(name: &str) -> bool {
+    cfg!(target_os = "macos") && name.len() == 7 && name.strip_prefix("subsdk").is_some_and(|n| matches!(n.as_bytes()[0], b'1'..=b'9'))
+}
+
 fn validate(dir: &Path) -> Result<()> {
     for (name, path) in entries(dir)? {
         if name.to_ascii_lowercase().ends_with(".stub") {
@@ -88,7 +93,7 @@ fn validate(dir: &Path) -> Result<()> {
             if lower.ends_with(".stub") {
                 bail!("{}: Atmosphere .stub file removal is not supported", path.display());
             }
-            if lower == "main" || lower == "sdk" || lower == "rtld" || (lower.starts_with("subsdk") && path.extension().is_none()) {
+            if lower == "main" || lower == "sdk" || lower == "rtld" || (lower.starts_with("subsdk") && path.extension().is_none() && !is_code_module(&lower)) {
                 bail!("{}: native ExeFS modules are not supported; this mod needs code execution, not just a RomFS overlay", path.display());
             }
         }
@@ -151,9 +156,13 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
     if data.starts_with(b"SARC") {
         let entries = nxfs::sarc::sarc(data)?;
         let mut contents: Vec<Vec<u8>> = entries.iter().map(|e| e.data.to_vec()).collect();
+        let mut added: Vec<(&str, Vec<u8>)> = Vec::new();
         for (key, node) in edits {
             let Some(i) = entries.iter().position(|e| e.is(key)) else {
-                eprintln!("[mods] skipped {key}: the archive has no such file");
+                match node {
+                    Node::File(p) => added.push((key, std::fs::read(p)?)),
+                    Node::Archive(_) => eprintln!("[mods] skipped {key}: the archive has no such file"),
+                }
                 continue;
             };
             contents[i] = match node {
@@ -161,7 +170,8 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
                 Node::Archive(inner) => edit(&contents[i], inner).with_context(|| key.clone())?,
             };
         }
-        return nxfs::sarc::rebuild(data, &contents.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let added: Vec<(&str, &[u8])> = added.iter().map(|(k, d)| (*k, d.as_slice())).collect();
+        return nxfs::sarc::rebuild_adding(data, &contents.iter().map(Vec::as_slice).collect::<Vec<_>>(), &added);
     }
     if data.starts_with(b"BNTX") {
         let textures = nxfs::bntx::textures(data)?;
@@ -184,7 +194,7 @@ fn edit(data: &[u8], edits: &BTreeMap<String, Node>) -> Result<Vec<u8>> {
             let Node::File(p) = node else { bail!("{key}: a text must be a .txt file") };
             let label = key.strip_suffix(".txt").with_context(|| format!("{key}: a text must be a .txt file"))?;
             let text = std::fs::read_to_string(p)?;
-            if let Err(e) = m.set_text(label, text.trim_end_matches(['\r', '\n'])) {
+            if let Err(e) = m.add_text(label, text.trim_end_matches(['\r', '\n'])) {
                 eprintln!("[mods] skipped {key}: {e}");
             }
         }

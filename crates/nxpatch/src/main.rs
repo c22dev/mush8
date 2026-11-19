@@ -33,6 +33,8 @@ enum Cmd {
         out: PathBuf,
         #[arg(long)]
         patch: Vec<PathBuf>,
+        #[arg(long)]
+        module: Vec<PathBuf>,
     },
     Verify {
         nso: Vec<PathBuf>,
@@ -51,6 +53,8 @@ enum Cmd {
     Stamp {
         #[arg(long)]
         patch: Vec<PathBuf>,
+        #[arg(long)]
+        module: Vec<PathBuf>,
     },
     Dis {
         nso: PathBuf,
@@ -80,6 +84,22 @@ fn stamp(patches: &[PathBuf]) -> Result<String> {
     Ok(format!("{h:016x}-{p:016x}"))
 }
 
+// subsdk1 to subsdk9 are free in Mario Kart 8 Deluxe, whose own modules are main, subsdk0 and sdk
+fn is_extra_module(name: &str) -> bool {
+    name.strip_prefix("subsdk").is_some_and(|n| n.len() == 1 && ('1'..='9').contains(&n.chars().next().unwrap()))
+}
+
+fn remove_extra_modules(out: &std::path::Path) -> Result<()> {
+    for e in std::fs::read_dir(out)? {
+        let path = e?.path();
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        if is_extra_module(name.split('.').next().unwrap_or_default()) {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
 fn parse_hex(s: &str) -> Result<u64, std::num::ParseIntError> {
     u64::from_str_radix(s.trim_start_matches("0x"), 16)
 }
@@ -93,9 +113,16 @@ fn main() -> Result<()> {
                 classify::report(m.text_bytes(), examples)?;
             }
         }
-        Cmd::Rewrite { nso, out, patch } => {
+        Cmd::Rewrite { mut nso, out, patch, module } => {
             std::fs::create_dir_all(&out)?;
             let _ = std::fs::remove_file(out.join("nxpatch.stamp"));
+            remove_extra_modules(&out)?;
+            for m in &module {
+                let name = m.file_name().unwrap().to_string_lossy();
+                anyhow::ensure!(is_extra_module(&name), "{}: a mod can add only the modules subsdk1 to subsdk9", m.display());
+                anyhow::ensure!(!nso.iter().any(|n| n.file_name() == m.file_name()), "two mods add {name}: turn one of them off");
+                nso.push(m.clone());
+            }
             let _ = std::fs::remove_file(out.join("nxpatch.skipped"));
             let mut skipped = String::new();
             let mut patches = Vec::new();
@@ -146,9 +173,9 @@ fn main() -> Result<()> {
                 writeln!(skipped, "{}\tit is for build {}, not this game update", c.source.display(), c.build_id)?;
             }
             std::fs::write(out.join("nxpatch.skipped"), skipped)?;
-            std::fs::write(out.join("nxpatch.stamp"), stamp(&patch)?)?;
+            std::fs::write(out.join("nxpatch.stamp"), stamp(&[patch, module].concat())?)?;
         }
-        Cmd::Stamp { patch } => println!("{}", stamp(&patch)?),
+        Cmd::Stamp { patch, module } => println!("{}", stamp(&[patch, module].concat())?),
         Cmd::Spins { nso } => {
             for p in nso {
                 let m = nxfs::nso::Nso::parse(&std::fs::read(&p)?)?;
