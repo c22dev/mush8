@@ -54,7 +54,8 @@ impl Replay<'_> {
         };
         let (w, h) = self.pass.as_ref().unwrap().size;
         let pipeline = self.e.states.pipeline(&vsc, (vs.hash, extra), &fsc, fs.hash ^ (uints as u64) << 48 ^ (sints as u64) << 56, &targets, &st, wait)?;
-        let ds = self.e.states.depth_stencil(&st, targets.depth.is_some(), targets.stencil);
+        let far_plane = vsc.iface.far_plane;
+        let ds = self.e.states.depth_stencil(&st, targets.depth.is_some(), targets.stencil, far_plane);
 
         let (sx, sy, sw, sh) = match st.scissor {
             Some([x, y, sw, sh]) => {
@@ -133,7 +134,7 @@ impl Replay<'_> {
         let prev = self.pass.as_ref().unwrap().fixed;
         let next = {
             let enc = &self.pass.as_ref().unwrap().enc;
-            bind_fixed(enc, prev, &pipeline, &ds, &st, upper_left, (w, h), [sx, sy, sw, sh])
+            bind_fixed(enc, prev, &pipeline, &ds, &st, far_plane, upper_left, (w, h), [sx, sy, sw, sh])
         };
         self.pass.as_mut().unwrap().fixed = Some(next);
         let enc = &self.pass.as_ref().unwrap().enc;
@@ -415,6 +416,7 @@ fn bind_fixed(
     pipeline: &gfx::Shared<super::state::Pipeline>,
     ds: &gfx::Shared<super::state::DepthState>,
     st: &super::GState,
+    far_plane: bool,
     upper_left: bool,
     target: (u32, u32),
     scissor: [u32; 4],
@@ -423,7 +425,10 @@ fn bind_fixed(
     let cull = p & 3;
     let ccw = (p >> 2 & 1 != 0) == upper_left;
     let lines = p >> 3 & 3 == 1;
-    let bias = if p >> 15 & (1 << (p >> 3 & 3)) != 0 { st.polygon_offset } else { [0.0; 3] };
+    let mut bias = if p >> 15 & (1 << (p >> 3 & 3)) != 0 { st.polygon_offset } else { [0.0; 3] };
+    if super::state::equal_tolerance(st, far_plane) {
+        bias[1] += super::state::EQUAL_BIAS;
+    }
     let (w, h) = target;
     let [vx, vy, vw, vh] = st.viewport.unwrap_or([0.0, 0.0, w as f32, h as f32]);
     let next = super::EncState {
